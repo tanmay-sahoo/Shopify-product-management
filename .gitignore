@@ -1,0 +1,8 @@
+.next
+node_modules
+.env
+dist
+coverage
+*.log
+prisma/dev.db
+prisma/dev.db-journal

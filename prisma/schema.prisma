@@ -1,0 +1,312 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum StoreStatus {
+  active
+  inactive
+  uninstalled
+  error
+}
+
+enum UserRole {
+  admin
+  manager
+  editor
+  viewer
+}
+
+enum ProductStatus {
+  active
+  draft
+  archived
+}
+
+enum ImageStatus {
+  pending
+  uploaded
+  failed
+  linked
+}
+
+enum ImportType {
+  products
+  variants
+  prices
+  inventory
+  images
+}
+
+enum ImportStatus {
+  uploaded
+  processing
+  validated
+  approved
+  pushing
+  completed
+  failed
+}
+
+enum ValidationStatus {
+  valid
+  warning
+  error
+}
+
+enum ActionType {
+  create_product
+  update_product
+  create_variant
+  update_variant
+  skip
+}
+
+enum DraftEntityType {
+  product
+  variant
+  image
+  inventory
+  metafield
+}
+
+enum DraftChangeType {
+  create
+  update
+  delete
+}
+
+enum DraftStatus {
+  draft
+  approved
+  rejected
+  pushed
+  failed
+}
+
+enum SyncStatus {
+  started
+  success
+  failed
+  partial
+}
+
+model Store {
+  id                    BigInt    @id @default(autoincrement())
+  shopDomain            String    @unique
+  displayName           String?   @db.VarChar(255)
+  shopifyClientId       String?   @db.VarChar(255)
+  shopifyClientSecretEncrypted String? @db.Text
+  accessTokenEncrypted  String    @db.Text
+  scopes                String?   @db.Text
+  status                StoreStatus @default(active)
+  installedAt           DateTime?
+  lastSyncAt            DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  users                 User[]
+  products              Product[]
+  variants              Variant[]
+  productImages         ProductImage[]
+  variantImages         VariantImage[]
+  imports               Import[]
+  draftChanges          DraftChange[]
+  syncLogs              SyncLog[]
+}
+
+model ShopifyAppCredential {
+  id                    BigInt   @id @default(autoincrement())
+  name                  String   @db.VarChar(255)
+  clientId              String   @db.VarChar(255)
+  clientSecretEncrypted String   @db.Text
+  notes                 String?  @db.Text
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([clientId])
+}
+
+model OAuthSession {
+  id                    BigInt   @id @default(autoincrement())
+  state                 String   @unique @db.VarChar(255)
+  shopDomain            String   @db.VarChar(255)
+  clientId              String   @db.VarChar(255)
+  clientSecretEncrypted String   @db.Text
+  createdAt             DateTime @default(now())
+  expiresAt             DateTime
+  usedAt                DateTime?
+
+  @@index([shopDomain])
+  @@index([expiresAt])
+}
+
+model User {
+  id           BigInt    @id @default(autoincrement())
+  storeId      BigInt?
+  name         String?
+  email        String?   @unique
+  passwordHash String?   @db.Text
+  role         UserRole  @default(viewer)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  store        Store?    @relation(fields: [storeId], references: [id])
+  imports      Import[]
+  draftChanges DraftChange[]
+}
+
+model Product {
+  id               BigInt      @id @default(autoincrement())
+  storeId          BigInt
+  shopifyProductId String
+  handle           String?
+  title            String?     @db.VarChar(500)
+  bodyHtml         String?     @db.LongText
+  vendor           String?
+  productType      String?
+  tags             String?     @db.Text
+  status           ProductStatus @default(draft)
+  seoTitle         String?
+  seoDescription   String?     @db.Text
+  rawShopifyJson   Json?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  store            Store       @relation(fields: [storeId], references: [id])
+  variants         Variant[]
+  productImages    ProductImage[]
+  variantImages    VariantImage[]
+
+  @@unique([storeId, shopifyProductId])
+}
+
+model Variant {
+  id                BigInt      @id @default(autoincrement())
+  storeId           BigInt
+  productId         BigInt
+  shopifyVariantId  String?
+  sku               String?
+  barcode           String?
+  title             String?     @db.VarChar(500)
+  option1Name       String?
+  option1Value      String?
+  option2Name       String?
+  option2Value      String?
+  option3Name       String?
+  option3Value      String?
+  price             Decimal?    @db.Decimal(12, 2)
+  compareAtPrice    Decimal?    @db.Decimal(12, 2)
+  inventoryQuantity Int         @default(0)
+  inventoryItemId   String?
+  weight            Decimal?    @db.Decimal(12, 3)
+  weightUnit        String?
+  rawShopifyJson    Json?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  store             Store       @relation(fields: [storeId], references: [id])
+  product           Product     @relation(fields: [productId], references: [id])
+  variantImages     VariantImage[]
+
+  @@index([sku])
+  @@index([productId])
+}
+
+model ProductImage {
+  id             BigInt      @id @default(autoincrement())
+  storeId        BigInt
+  productId      BigInt
+  shopifyMediaId String?
+  sourceUrl      String?     @db.Text
+  altText        String?     @db.VarChar(500)
+  position       Int         @default(0)
+  hash           String?
+  status         ImageStatus @default(pending)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  store          Store       @relation(fields: [storeId], references: [id])
+  product        Product     @relation(fields: [productId], references: [id])
+  variantLinks   VariantImage[]
+}
+
+model VariantImage {
+  id             BigInt      @id @default(autoincrement())
+  storeId        BigInt
+  productId      BigInt
+  variantId      BigInt
+  productImageId BigInt?
+  shopifyMediaId String?
+  sourceUrl      String?     @db.Text
+  position       Int         @default(0)
+  isPrimary      Boolean     @default(false)
+  status         ImageStatus @default(pending)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  store          Store       @relation(fields: [storeId], references: [id])
+  product        Product     @relation(fields: [productId], references: [id])
+  variant        Variant     @relation(fields: [variantId], references: [id])
+  productImage   ProductImage? @relation(fields: [productImageId], references: [id])
+}
+
+model Import {
+  id         BigInt       @id @default(autoincrement())
+  storeId    BigInt
+  userId     BigInt?
+  fileName   String?      @db.VarChar(500)
+  fileUrl    String?      @db.Text
+  importType ImportType   @default(products)
+  status     ImportStatus @default(uploaded)
+  totalRows  Int          @default(0)
+  validRows  Int          @default(0)
+  errorRows  Int          @default(0)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  store      Store        @relation(fields: [storeId], references: [id])
+  user       User?        @relation(fields: [userId], references: [id])
+  rows       ImportRow[]
+}
+
+model ImportRow {
+  id               BigInt           @id @default(autoincrement())
+  importId         BigInt
+  rowNumber        Int
+  handle           String?
+  sku              String?
+  rowData          Json
+  validationStatus ValidationStatus @default(valid)
+  validationErrors Json?
+  actionType       ActionType       @default(skip)
+  createdAt        DateTime         @default(now())
+  import           Import           @relation(fields: [importId], references: [id])
+}
+
+model DraftChange {
+  id              BigInt          @id @default(autoincrement())
+  storeId         BigInt
+  userId          BigInt?
+  entityType      DraftEntityType
+  entityId        BigInt?
+  shopifyEntityId String?
+  changeType      DraftChangeType
+  beforeData      Json?
+  afterData       Json?
+  status          DraftStatus     @default(draft)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  store           Store           @relation(fields: [storeId], references: [id])
+  user            User?           @relation(fields: [userId], references: [id])
+}
+
+model SyncLog {
+  id          BigInt     @id @default(autoincrement())
+  storeId     BigInt
+  jobType     String?
+  status      SyncStatus @default(started)
+  message     String?    @db.Text
+  payload     Json?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  store       Store      @relation(fields: [storeId], references: [id])
+}
