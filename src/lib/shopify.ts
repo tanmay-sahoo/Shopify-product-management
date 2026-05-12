@@ -102,7 +102,7 @@ export const PRODUCTS_SYNC_QUERY = `
             title
             description
           }
-          media(first: 20) {
+          media(first: 250) {
             edges {
               node {
                 id

@@ -83,6 +83,51 @@ const PRODUCT_VARIANT_APPEND_MEDIA = `
   }
 `;
 
+const MEDIA_STATUS_QUERY = `
+  query MediaStatus($ids: [ID!]!) {
+    nodes(ids: $ids) {
+      ... on MediaImage { id status }
+    }
+  }
+`;
+
+// Shopify processes media (downloads from URL, generates renditions) async.
+// Returns the set of media IDs that reach status=READY within the timeout.
+async function waitForMediaReady(
+  auth: ShopAuth,
+  mediaIds: string[],
+  timeoutMs = 45_000
+): Promise<Set<string>> {
+  const ready = new Set<string>();
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs && ready.size < mediaIds.length) {
+    const pending = mediaIds.filter((id) => !ready.has(id));
+    if (pending.length === 0) break;
+    type Resp = {
+      data?: { nodes?: Array<{ id: string; status?: string | null } | null> };
+      errors?: Array<{ message: string }>;
+    };
+    let resp: Resp;
+    try {
+      resp = await shopifyGraphQLRequest<Resp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: MEDIA_STATUS_QUERY,
+        variables: { ids: pending }
+      });
+    } catch {
+      break;
+    }
+    for (const node of resp.data?.nodes ?? []) {
+      if (node?.status === "READY") ready.add(node.id);
+    }
+    if (ready.size < mediaIds.length) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return ready;
+}
+
 const METAFIELDS_SET = `
   mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {
@@ -149,6 +194,49 @@ function statusEnum(value: string): "ACTIVE" | "DRAFT" | "ARCHIVED" {
   if (v === "draft") return "DRAFT";
   if (v === "archived") return "ARCHIVED";
   return "ACTIVE";
+}
+
+function normalisedOptionKey(variant: ParsedVariant): string {
+  const n = (v: string | undefined) => (v ?? "").trim().toLowerCase();
+  return `${n(variant.option1Value)}|${n(variant.option2Value)}|${n(variant.option3Value)}`;
+}
+
+// Final defense-in-depth: even if the parser somehow lets duplicates through,
+// we collapse them here before sending productSet so Shopify never sees two
+// variants with the same option-value combination. Also collapses by SKU as
+// a backup — Shopify keeps SKUs unique per product, so two rows with the
+// same non-empty SKU are always the same variant.
+function dedupeVariantsByOptions(variants: ParsedVariant[]): ParsedVariant[] {
+  const byOptionKey = new Map<string, ParsedVariant>();
+  const bySku = new Map<string, ParsedVariant>();
+  const merge = (target: ParsedVariant, incoming: ParsedVariant) => {
+    for (const k of Object.keys(incoming) as Array<keyof ParsedVariant>) {
+      const value = incoming[k];
+      if (typeof value === "string" && value.trim() === "") continue;
+      if (Array.isArray(value) && value.length === 0) continue;
+      (target as Record<string, unknown>)[k as string] = value;
+    }
+  };
+
+  for (const v of variants) {
+    const optionKey = normalisedOptionKey(v);
+    const skuKey = (v.sku ?? "").trim();
+
+    let target = byOptionKey.get(optionKey);
+    if (!target && skuKey) target = bySku.get(skuKey);
+
+    if (!target) {
+      const copy: ParsedVariant = { ...v };
+      byOptionKey.set(optionKey, copy);
+      if (skuKey) bySku.set(skuKey, copy);
+      continue;
+    }
+    merge(target, v);
+    byOptionKey.set(optionKey, target);
+    if (skuKey) bySku.set(skuKey, target);
+  }
+  // De-dup the resulting list (a variant could land in both maps).
+  return Array.from(new Set(byOptionKey.values()));
 }
 
 function variantOptionValues(
@@ -291,7 +379,7 @@ async function pushOneProduct(
     status: statusEnum(product.status),
     seo: { title: product.seoTitle, description: product.seoDescription },
     productOptions: productOptions.length ? productOptions : undefined,
-    variants: product.variants.map((variant) => {
+    variants: dedupeVariantsByOptions(product.variants).map((variant) => {
       const optionValues =
         productOptions.length === 0
           ? []
@@ -385,41 +473,108 @@ async function pushOneProduct(
       query: PRODUCT_CREATE_MEDIA,
       variables: { productId, media: mediaInputs }
     });
-    if (!resp.errors?.length && !resp.data?.productCreateMedia?.mediaUserErrors?.length) {
-      const returned = resp.data?.productCreateMedia?.media ?? [];
-      mediaInputs.forEach((input, idx) => {
-        const node = returned[idx];
-        if (node?.id) mediaIdBySourceUrl.set(input.originalSource, node.id);
-      });
-      imagesCreated = mediaInputs.length;
+    if (resp.errors?.length || resp.data?.productCreateMedia?.mediaUserErrors?.length) {
+      const issues = [
+        ...(resp.errors?.map((e) => e.message) ?? []),
+        ...(resp.data?.productCreateMedia?.mediaUserErrors?.map(
+          (e) => `${(e.field ?? []).join(".")}: ${e.message}`
+        ) ?? [])
+      ].join("; ");
+      console.warn(`[import-push] productCreateMedia issues for ${product.handle}: ${issues}`);
     }
+    const returned = resp.data?.productCreateMedia?.media ?? [];
+    mediaInputs.forEach((input, idx) => {
+      const node = returned[idx];
+      if (node?.id) mediaIdBySourceUrl.set(input.originalSource, node.id);
+    });
+    imagesCreated = mediaIdBySourceUrl.size;
   }
 
   // 3b. Variant images — attach the uploaded media to the right variant.
+  // Falls back to matching the variantImage URL against the product.images list
+  // by index if the exact URL isn't in the lookup map.
+  const productImageUrlToIndex = new Map<string, number>();
+  product.images.forEach((img, idx) => {
+    if (img.src) productImageUrlToIndex.set(img.src.trim(), idx);
+  });
+  const uploadedMediaIdsInOrder: string[] = orderedUrls
+    .map((url) => mediaIdBySourceUrl.get(url))
+    .filter((id): id is string => Boolean(id));
+
+  const dedupedForAttach = dedupeVariantsByOptions(product.variants);
   const variantMediaAssignments: Array<{ variantId: string; mediaIds: string[] }> = [];
-  product.variants.forEach((parsedVariant, idx) => {
+  let variantImagesUnmatched = 0;
+  dedupedForAttach.forEach((parsedVariant, idx) => {
     const url = (parsedVariant.variantImage ?? "").trim();
     if (!url) return;
-    const mediaId = mediaIdBySourceUrl.get(url);
-    if (!mediaId) return;
+    let mediaId = mediaIdBySourceUrl.get(url);
+    if (!mediaId) {
+      // Fallback: align by index against product images.
+      const positionalIdx = productImageUrlToIndex.get(url);
+      if (positionalIdx !== undefined && uploadedMediaIdsInOrder[positionalIdx]) {
+        mediaId = uploadedMediaIdsInOrder[positionalIdx];
+      }
+    }
+    if (!mediaId) {
+      variantImagesUnmatched++;
+      return;
+    }
     const matched = parsedVariant.sku
       ? createdVariants.find((edge) => edge.node.sku === parsedVariant.sku)
       : createdVariants[idx];
     const variantGid = matched?.node.id;
-    if (!variantGid) return;
+    if (!variantGid) {
+      variantImagesUnmatched++;
+      return;
+    }
     variantMediaAssignments.push({ variantId: variantGid, mediaIds: [mediaId] });
   });
+
+  let variantImagesAttached = 0;
   if (variantMediaAssignments.length > 0) {
-    type Resp = {
-      data?: { productVariantAppendMedia?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
-      errors?: Array<{ message: string }>;
-    };
-    await shopifyGraphQLRequest<Resp>({
-      shopDomain: auth.shopDomain,
-      accessToken: auth.accessToken,
-      query: PRODUCT_VARIANT_APPEND_MEDIA,
-      variables: { productId, variantMedia: variantMediaAssignments }
-    });
+    // Wait for the relevant media items to finish Shopify-side processing
+    // before attaching them to variants.
+    const neededMediaIds = Array.from(
+      new Set(variantMediaAssignments.flatMap((v) => v.mediaIds))
+    );
+    const readyIds = await waitForMediaReady(auth, neededMediaIds);
+    const readyAssignments = variantMediaAssignments.filter((v) =>
+      v.mediaIds.every((id) => readyIds.has(id))
+    );
+
+    if (readyAssignments.length < variantMediaAssignments.length) {
+      console.warn(
+        `[import-push] ${variantMediaAssignments.length - readyAssignments.length} variant-image attach(es) skipped for ${product.handle} (media not ready in time)`
+      );
+    }
+
+    if (readyAssignments.length > 0) {
+      type Resp = {
+        data?: { productVariantAppendMedia?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
+        errors?: Array<{ message: string }>;
+      };
+      const resp = await shopifyGraphQLRequest<Resp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: PRODUCT_VARIANT_APPEND_MEDIA,
+        variables: { productId, variantMedia: readyAssignments }
+      });
+      const errs = userErrorMessage(resp.data?.productVariantAppendMedia?.userErrors);
+      if (errs || resp.errors?.length) {
+        console.warn(
+          `[import-push] productVariantAppendMedia for ${product.handle} returned errors: ${
+            errs || resp.errors?.map((e) => e.message).join("; ")
+          }`
+        );
+      } else {
+        variantImagesAttached = readyAssignments.length;
+      }
+    }
+  }
+  if (variantImagesUnmatched > 0) {
+    console.warn(
+      `[import-push] ${variantImagesUnmatched} variant image(s) for ${product.handle} could not be matched to uploaded media`
+    );
   }
 
   // 4. Metafields via metafieldsSet (product + variants).
@@ -523,9 +678,9 @@ async function pushOneProduct(
   return {
     handle: product.handle,
     ok: true,
-    message: `Pushed product ${product.handle} with ${product.variants.length} variant(s)`,
+    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)`,
     productId,
-    variantsCreated: product.variants.length,
+    variantsCreated: dedupedForAttach.length,
     imagesCreated,
     metafieldsSet
   };
