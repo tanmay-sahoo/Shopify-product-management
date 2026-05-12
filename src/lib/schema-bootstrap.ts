@@ -65,6 +65,44 @@ async function bootstrap() {
   `);
 
   await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`ProductMetafield\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`productId\` BIGINT NOT NULL,
+      \`shopifyMetafieldId\` VARCHAR(255) NULL,
+      \`namespace\` VARCHAR(255) NOT NULL,
+      \`metafieldKey\` VARCHAR(255) NOT NULL,
+      \`type\` VARCHAR(255) NOT NULL,
+      \`value\` MEDIUMTEXT NULL,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`ProductMetafield_productId_idx\` (\`productId\`),
+      INDEX \`ProductMetafield_storeId_idx\` (\`storeId\`),
+      UNIQUE INDEX \`ProductMetafield_productId_namespace_key_unique\` (\`productId\`, \`namespace\`, \`metafieldKey\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`VariantMetafield\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`variantId\` BIGINT NOT NULL,
+      \`shopifyMetafieldId\` VARCHAR(255) NULL,
+      \`namespace\` VARCHAR(255) NOT NULL,
+      \`metafieldKey\` VARCHAR(255) NOT NULL,
+      \`type\` VARCHAR(255) NOT NULL,
+      \`value\` MEDIUMTEXT NULL,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`VariantMetafield_variantId_idx\` (\`variantId\`),
+      INDEX \`VariantMetafield_storeId_idx\` (\`storeId\`),
+      UNIQUE INDEX \`VariantMetafield_variantId_namespace_key_unique\` (\`variantId\`, \`namespace\`, \`metafieldKey\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS \`InventorySyncGroupItem\` (
       \`id\` BIGINT NOT NULL AUTO_INCREMENT,
       \`groupId\` BIGINT NOT NULL,

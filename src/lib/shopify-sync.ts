@@ -2,7 +2,26 @@ import { Prisma } from "@prisma/client";
 
 import { getPrismaClient } from "@/lib/prisma";
 import { decryptValue } from "@/lib/oauth";
-import { PRODUCTS_SYNC_QUERY, fetchShopInfo, shopifyGraphQLRequest } from "@/lib/shopify";
+import {
+  PRODUCTS_SYNC_QUERY,
+  PRODUCT_METAFIELDS_PAGE_QUERY,
+  VARIANT_METAFIELDS_PAGE_QUERY,
+  fetchShopInfo,
+  shopifyGraphQLRequest
+} from "@/lib/shopify";
+
+type MetafieldNode = {
+  id: string;
+  namespace: string | null;
+  key: string | null;
+  value: string | null;
+  type: string | null;
+};
+
+type MetafieldsConnection = {
+  pageInfo?: { hasNextPage: boolean; endCursor: string | null };
+  edges: Array<{ node: MetafieldNode }>;
+};
 
 type ShopifyProductsResponse = {
   data?: {
@@ -51,6 +70,89 @@ type ShopifyProductsResponse = {
   };
   errors?: Array<{ message: string }>;
 };
+
+async function fetchAllMetafields(
+  scope: "product" | "variant",
+  shopifyOwnerId: string,
+  shopDomain: string,
+  accessToken: string
+): Promise<MetafieldNode[]> {
+  const query = scope === "product" ? PRODUCT_METAFIELDS_PAGE_QUERY : VARIANT_METAFIELDS_PAGE_QUERY;
+  type PageResp = {
+    data?: {
+      product?: { metafields: MetafieldsConnection } | null;
+      productVariant?: { metafields: MetafieldsConnection } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  const nodes: MetafieldNode[] = [];
+  let cursor: string | null = null;
+  let hasNext = true;
+  while (hasNext) {
+    const resp: PageResp = await shopifyGraphQLRequest<PageResp>({
+      shopDomain,
+      accessToken,
+      query,
+      variables: { id: shopifyOwnerId, cursor }
+    });
+    if (resp.errors?.length) break;
+    const conn: MetafieldsConnection | undefined =
+      scope === "product"
+        ? resp.data?.product?.metafields
+        : resp.data?.productVariant?.metafields;
+    if (!conn) break;
+    nodes.push(...conn.edges.map((edge: { node: MetafieldNode }) => edge.node));
+    hasNext = conn.pageInfo?.hasNextPage ?? false;
+    cursor = conn.pageInfo?.endCursor ?? null;
+  }
+  return nodes;
+}
+
+async function replaceMetafields(
+  scope: "product" | "variant",
+  storeId: bigint,
+  ownerId: bigint,
+  nodes: MetafieldNode[]
+) {
+  const db = getPrismaClient();
+  const table = scope === "product" ? "ProductMetafield" : "VariantMetafield";
+  const ownerColumn = scope === "product" ? "productId" : "variantId";
+
+  await db.$executeRawUnsafe(
+    `DELETE FROM \`${table}\` WHERE \`${ownerColumn}\` = ?`,
+    ownerId
+  );
+
+  // Dedupe by (namespace, key) — Shopify can hand back the same standard
+  // taxonomy metafield twice during pagination overlaps.
+  const deduped = new Map<string, MetafieldNode>();
+  for (const node of nodes) {
+    if (!node.namespace || !node.key || !node.type) continue;
+    deduped.set(`${node.namespace}|${node.key}`, node);
+  }
+
+  for (const node of deduped.values()) {
+    // ON DUPLICATE KEY UPDATE makes this idempotent even if a duplicate slips
+    // past the in-memory dedupe (e.g. two GIDs for the same namespace.key).
+    await db.$executeRawUnsafe(
+      `INSERT INTO \`${table}\` (storeId, ${ownerColumn}, shopifyMetafieldId, namespace, metafieldKey, type, value, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3))
+       ON DUPLICATE KEY UPDATE
+         shopifyMetafieldId = VALUES(shopifyMetafieldId),
+         type = VALUES(type),
+         value = VALUES(value),
+         updatedAt = NOW(3)`,
+      storeId,
+      ownerId,
+      node.id,
+      node.namespace,
+      node.key,
+      node.type,
+      node.value ?? null
+    );
+  }
+}
 
 function toProductStatus(value: "ACTIVE" | "DRAFT" | "ARCHIVED") {
   if (value === "ACTIVE") return "active" as const;
@@ -183,6 +285,14 @@ export async function syncStoreCatalog(storeId: bigint | number) {
         }
       }
 
+      const productMfNodes = await fetchAllMetafields(
+        "product",
+        productNode.id,
+        store.shopDomain,
+        accessToken
+      );
+      await replaceMetafields("product", store.id, productRecord.id, productMfNodes);
+
       await db.variant.deleteMany({
         where: {
           storeId: store.id,
@@ -192,7 +302,7 @@ export async function syncStoreCatalog(storeId: bigint | number) {
 
       for (const variantEdge of productNode.variants.edges) {
         const variantNode = variantEdge.node;
-        await db.variant.create({
+        const createdVariant = await db.variant.create({
           data: {
             storeId: store.id,
             productId: productRecord.id,
@@ -209,6 +319,13 @@ export async function syncStoreCatalog(storeId: bigint | number) {
             rawShopifyJson: variantNode as unknown as Prisma.InputJsonValue
           }
         });
+        const variantMfNodes = await fetchAllMetafields(
+          "variant",
+          variantNode.id,
+          store.shopDomain,
+          accessToken
+        );
+        await replaceMetafields("variant", store.id, createdVariant.id, variantMfNodes);
         syncedVariants += 1;
       }
 

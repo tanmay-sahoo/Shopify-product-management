@@ -84,6 +84,20 @@ export const PRODUCTS_SYNC_QUERY = `
           productType
           tags
           updatedAt
+          publishedAt
+          templateSuffix
+          isGiftCard
+          options {
+            id
+            name
+            position
+            values
+          }
+          category {
+            id
+            name
+            fullName
+          }
           seo {
             title
             description
@@ -108,7 +122,7 @@ export const PRODUCTS_SYNC_QUERY = `
               }
             }
           }
-          variants(first: 50) {
+          variants(first: 100) {
             edges {
               node {
                 id
@@ -118,14 +132,63 @@ export const PRODUCTS_SYNC_QUERY = `
                 price
                 compareAtPrice
                 inventoryQuantity
+                inventoryPolicy
+                taxable
+                taxCode
+                position
+                selectedOptions {
+                  name
+                  value
+                }
+                image {
+                  id
+                  url
+                  altText
+                }
                 updatedAt
                 inventoryItem {
                   id
+                  tracked
+                  requiresShipping
+                  measurement {
+                    weight {
+                      unit
+                      value
+                    }
+                  }
+                  unitCost {
+                    amount
+                    currencyCode
+                  }
+                  countryCodeOfOrigin
+                  harmonizedSystemCode
                 }
               }
             }
           }
         }
+      }
+    }
+  }
+`;
+
+export const PRODUCT_METAFIELDS_PAGE_QUERY = `
+  query ProductMetafieldsPage($id: ID!, $cursor: String) {
+    product(id: $id) {
+      metafields(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { id namespace key value type } }
+      }
+    }
+  }
+`;
+
+export const VARIANT_METAFIELDS_PAGE_QUERY = `
+  query VariantMetafieldsPage($id: ID!, $cursor: String) {
+    productVariant(id: $id) {
+      metafields(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { id namespace key value type } }
       }
     }
   }

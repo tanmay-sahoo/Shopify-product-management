@@ -126,8 +126,8 @@ export async function getDashboardData(): Promise<DashboardData> {
             },
             orderBy: { updatedAt: "desc" }
           },
-          syncLogs: { orderBy: { createdAt: "desc" }, take: 10 },
-          draftChanges: { orderBy: { createdAt: "desc" }, take: 10 },
+          syncLogs: { orderBy: { createdAt: "desc" }, take: 50 },
+          draftChanges: { orderBy: { createdAt: "desc" }, take: 500 },
           imports: {
             orderBy: { createdAt: "desc" },
             take: 1,
@@ -245,7 +245,9 @@ export async function getDashboardData(): Promise<DashboardData> {
     stats: {
       totalProducts: liveProducts.length,
       totalVariants: liveVariants.length,
-      draftChanges: connectedStore.draftChanges.length,
+      draftChanges: await db.draftChange.count({
+        where: { storeId: connectedStore.id, status: { in: ["draft", "approved"] } }
+      }),
       importErrors: latestImport?.errorRows ?? 0,
       imagesPending: 0,
       lastSyncAt: (connectedStore.lastSyncAt ?? connectedStore.updatedAt).toISOString()
