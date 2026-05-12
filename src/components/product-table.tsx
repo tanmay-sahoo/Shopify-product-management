@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Badge } from "@/components/badge";
@@ -74,6 +74,9 @@ export function ProductTable({ products, store }: Props) {
   const [editorMode, setEditorMode] = useState<"create" | "edit">("edit");
   const [editorOpen, setEditorOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+  const currencyCode = store?.currencyCode ?? null;
 
   const vendors = useMemo(
     () => Array.from(new Set(products.map((p) => p.vendor).filter(Boolean))).sort(),
@@ -152,10 +155,19 @@ export function ProductTable({ products, store }: Props) {
   }
 
   function toggleSelectAll() {
-    if (selected.size === filteredProducts.length) {
-      setSelected(new Set());
+    const pageIds = pagedProducts.map((p) => p.id);
+    if (pageIds.every((id) => selected.has(id))) {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const id of pageIds) next.delete(id);
+        return next;
+      });
     } else {
-      setSelected(new Set(filteredProducts.map((p) => p.id)));
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const id of pageIds) next.add(id);
+        return next;
+      });
     }
   }
 
@@ -190,8 +202,19 @@ export function ProductTable({ products, store }: Props) {
   const hasActiveFilter = query || vendorFilter || typeFilter || statusFilter;
   const variantProductCount = filteredProducts.filter((p) => p.variants.length > 1).length;
   const allExpanded = variantProductCount > 0 && expanded.size === variantProductCount;
-  const allSelected = selected.size === filteredProducts.length && filteredProducts.length > 0;
   const totalVariants = filteredProducts.reduce((acc, p) => acc + p.variants.length, 0);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedProducts = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredProducts.slice(start, start + pageSize);
+  }, [filteredProducts, safePage, pageSize]);
+  const allSelected = selected.size === pagedProducts.length && pagedProducts.length > 0;
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, vendorFilter, typeFilter, statusFilter, pageSize]);
 
   return (
     <>
@@ -294,7 +317,7 @@ export function ProductTable({ products, store }: Props) {
           </span>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="max-h-[70vh] overflow-auto">
           {filteredProducts.length === 0 ? (
             <div className="px-6 py-12 text-center text-sm text-muted">
               No products match this filter. If this is the first run, click `Sync now` in the top bar.
@@ -302,7 +325,7 @@ export function ProductTable({ products, store }: Props) {
           ) : null}
           {filteredProducts.length > 0 ? (
             <table className="min-w-full text-left text-sm">
-              <thead className="bg-slate-50/80 text-[11px] uppercase tracking-[0.16em] text-muted">
+              <thead className="sticky top-0 z-20 bg-slate-50/95 text-[11px] uppercase tracking-[0.16em] text-muted shadow-[0_1px_0_0_rgba(15,23,42,0.06)] backdrop-blur">
                 <tr>
                   <th className="w-10 px-4 py-4">
                     <input
@@ -324,7 +347,7 @@ export function ProductTable({ products, store }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {filteredProducts.map((product) => {
+                {pagedProducts.map((product) => {
                   const isExpanded = expanded.has(product.id);
                   const isSelected = selected.has(product.id);
                   const totalInventory = product.variants.reduce(
@@ -550,10 +573,10 @@ export function ProductTable({ products, store }: Props) {
                                             </div>
                                           </td>
                                           <td className="px-4 py-3 text-sm font-semibold text-ink">
-                                            {currency(variant.price)}
+                                            {currency(variant.price, currencyCode)}
                                           </td>
                                           <td className="px-4 py-3 text-xs text-muted">
-                                            {variant.compareAtPrice ? currency(variant.compareAtPrice) : "—"}
+                                            {variant.compareAtPrice ? currency(variant.compareAtPrice, currencyCode) : "—"}
                                           </td>
                                           <td className="px-4 py-3">
                                             <span
@@ -589,6 +612,67 @@ export function ProductTable({ products, store }: Props) {
             </table>
           ) : null}
         </div>
+
+        {filteredProducts.length > 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line/70 bg-slate-50/60 px-6 py-3 text-xs text-muted">
+            <span>
+              Showing <span className="font-semibold text-ink">{(safePage - 1) * pageSize + 1}</span>–
+              <span className="font-semibold text-ink">
+                {Math.min(safePage * pageSize, filteredProducts.length)}
+              </span>{" "}
+              of <span className="font-semibold text-ink">{filteredProducts.length}</span>
+            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.16em]">
+                Page size
+                <select
+                  value={pageSize}
+                  onChange={(event) => setPageSize(Number(event.target.value))}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs font-medium text-ink"
+                >
+                  {[10, 25, 50, 100, 250].map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(1)}
+                  disabled={safePage === 1}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs font-semibold text-ink disabled:opacity-40 hover:bg-canvas"
+                >
+                  «
+                </button>
+                <button
+                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                  disabled={safePage === 1}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs font-semibold text-ink disabled:opacity-40 hover:bg-canvas"
+                >
+                  Prev
+                </button>
+                <span className="px-2 text-xs font-semibold text-ink">
+                  {safePage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={safePage === totalPages}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs font-semibold text-ink disabled:opacity-40 hover:bg-canvas"
+                >
+                  Next
+                </button>
+                <button
+                  onClick={() => setPage(totalPages)}
+                  disabled={safePage === totalPages}
+                  className="rounded-lg border border-line bg-white px-2 py-1 text-xs font-semibold text-ink disabled:opacity-40 hover:bg-canvas"
+                >
+                  »
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       <BulkActionBar
@@ -607,6 +691,7 @@ export function ProductTable({ products, store }: Props) {
         productTypes={types}
         onClose={closeEditor}
         onSaved={handleSaved}
+        currencyCode={currencyCode}
       />
     </>
   );

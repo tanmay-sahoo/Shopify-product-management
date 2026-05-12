@@ -49,7 +49,7 @@ export function Topbar({ store, stores }: Props) {
 
   if (!store) {
     return (
-      <header className="flex flex-col gap-4 border-b border-line/60 bg-white/80 px-8 py-5 backdrop-blur lg:flex-row lg:items-center lg:justify-between">
+      <header className="relative z-30 flex flex-col gap-4 border-b border-line/60 bg-white/80 px-8 py-5 backdrop-blur lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-3">
           <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-amber-50 text-amber-700">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
@@ -76,7 +76,7 @@ export function Topbar({ store, stores }: Props) {
   const isActive = store.status === "active";
 
   return (
-    <header className="flex flex-col gap-4 border-b border-line/60 bg-white/80 px-8 py-5 backdrop-blur lg:flex-row lg:items-center lg:justify-between">
+    <header className="relative z-30 flex flex-col gap-4 border-b border-line/60 bg-white/80 px-8 py-5 backdrop-blur lg:flex-row lg:items-center lg:justify-between">
       <div className="flex items-center gap-4">
         <StoreSwitcher current={store} stores={stores} />
         <div className="flex flex-col gap-1">

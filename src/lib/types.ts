@@ -12,6 +12,7 @@ export type StoreSummary = {
   installedAt: string;
   lastSyncAt: string;
   scopes: string[];
+  currencyCode: string | null;
 };
 
 export type ProductImage = {

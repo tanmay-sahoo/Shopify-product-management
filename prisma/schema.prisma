@@ -103,6 +103,7 @@ model Store {
   shopifyClientSecretEncrypted String? @db.Text
   accessTokenEncrypted  String    @db.Text
   scopes                String?   @db.Text
+  currencyCode          String?   @db.VarChar(3)
   status                StoreStatus @default(active)
   installedAt           DateTime?
   lastSyncAt            DateTime?
@@ -296,6 +297,64 @@ model DraftChange {
   updatedAt       DateTime        @updatedAt
   store           Store           @relation(fields: [storeId], references: [id])
   user            User?           @relation(fields: [userId], references: [id])
+}
+
+enum SyncGroupMode {
+  mirror
+  shared_pool
+  bundle
+}
+
+enum SyncGroupItemRole {
+  source
+  target
+  component
+  combo
+  member
+}
+
+model InventorySyncGroup {
+  id             BigInt        @id @default(autoincrement())
+  storeId        BigInt
+  name           String        @db.VarChar(255)
+  mode           SyncGroupMode
+  syncStock      Boolean       @default(true)
+  syncPrice      Boolean       @default(false)
+  active         Boolean       @default(true)
+  lastSyncedAt   DateTime?
+  lastError      String?       @db.Text
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  items          InventorySyncGroupItem[]
+
+  @@index([storeId])
+}
+
+model InventorySyncGroupItem {
+  id                BigInt              @id @default(autoincrement())
+  groupId           BigInt
+  storeId           BigInt
+  productId         BigInt?
+  variantId         BigInt?
+  shopifyProductId  String?             @db.VarChar(255)
+  shopifyVariantId  String              @db.VarChar(255)
+  inventoryItemId   String?             @db.VarChar(255)
+  locationId        String?             @db.VarChar(255)
+  role              SyncGroupItemRole
+  quantityRequired  Int                 @default(1)
+  stockBuffer       Int                 @default(0)
+  priceMultiplier   Decimal             @default(1) @db.Decimal(12, 4)
+  syncStock         Boolean             @default(true)
+  syncPrice         Boolean             @default(false)
+  active            Boolean             @default(true)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  group             InventorySyncGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+  @@index([storeId])
+  @@index([shopifyVariantId])
+  @@index([inventoryItemId])
 }
 
 model SyncLog {

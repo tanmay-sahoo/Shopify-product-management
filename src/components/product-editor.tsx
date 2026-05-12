@@ -16,6 +16,7 @@ type Props = {
   productTypes: string[];
   onClose: () => void;
   onSaved: () => void;
+  currencyCode?: string | null;
 };
 
 type VariantDraft = {
@@ -115,7 +116,8 @@ export function ProductEditor({
   vendors,
   productTypes,
   onClose,
-  onSaved
+  onSaved,
+  currencyCode
 }: Props) {
   const [draft, setDraft] = useState<Draft>(() => productToDraft(product));
   const [isSaving, setSaving] = useState(false);
@@ -528,7 +530,7 @@ export function ProductEditor({
                         placeholder="0"
                       />
                     </SmallField>
-                    <SmallField label="Price (USD)">
+                    <SmallField label={`Price (${(currencyCode ?? "USD").toUpperCase()})`}>
                       <input
                         type="number"
                         step="0.01"
@@ -569,8 +571,8 @@ export function ProductEditor({
                         ).toFixed(0)}
                         %
                       </span>{" "}
-                      from {currency(Number(variant.compareAtPrice) || 0)} →{" "}
-                      {currency(Number(variant.price) || 0)}
+                      from {currency(Number(variant.compareAtPrice) || 0, currencyCode)} →{" "}
+                      {currency(Number(variant.price) || 0, currencyCode)}
                     </p>
                   ) : null}
                 </div>

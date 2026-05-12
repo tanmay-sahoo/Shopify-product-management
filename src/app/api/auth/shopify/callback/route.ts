@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -8,6 +9,7 @@ import {
   validateShopDomain,
   verifyShopifyHmac
 } from "@/lib/oauth";
+import { fetchShopInfo } from "@/lib/shopify";
 import { ACTIVE_STORE_COOKIE, ACTIVE_STORE_COOKIE_MAX_AGE } from "@/lib/active-store";
 import { getPrismaClient } from "@/lib/prisma";
 import { ensureSchemaCompatibility } from "@/lib/schema-bootstrap";
@@ -114,6 +116,8 @@ export async function GET(request: NextRequest) {
   try {
     await ensureSchemaCompatibility();
 
+    const shopInfo = await fetchShopInfo(shop, tokenResponse.access_token);
+
     const existing = await prisma.store.findUnique({ where: { shopDomain: shop } });
     const createData: Record<string, unknown> = {
       shopDomain: shop,
@@ -152,6 +156,12 @@ export async function GET(request: NextRequest) {
         update: updateData as Parameters<typeof prisma.store.upsert>[0]["update"]
       })
     ]);
+
+    if (shopInfo?.currencyCode) {
+      await prisma.$executeRaw(
+        Prisma.sql`UPDATE \`Store\` SET \`currencyCode\` = ${shopInfo.currencyCode} WHERE \`shopDomain\` = ${shop}`
+      );
+    }
   } catch (error) {
     console.error("[shopify callback] DB write failed:", error);
     return redirectError(request, classifyError(error));
@@ -198,7 +208,16 @@ async function registerProductWebhooks(shop: string, accessToken: string, reques
     return;
   }
 
-  const topics = ["products/update", "products/create", "products/delete", "inventory_levels/update"];
+  const topics = [
+    "products/update",
+    "products/create",
+    "products/delete",
+    "inventory_levels/update",
+    "orders/create",
+    "orders/paid",
+    "orders/cancelled",
+    "refunds/create"
+  ];
   for (const topic of topics) {
     await fetch(`https://${shop}/admin/api/2025-10/webhooks.json`, {
       method: "POST",

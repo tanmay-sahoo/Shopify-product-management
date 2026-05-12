@@ -4,21 +4,22 @@ import { Fragment, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { Badge } from "@/components/badge";
-import type { DraftChange } from "@/lib/types";
+import type { DraftChange, StoreSummary } from "@/lib/types";
 import { cn, currency, formatDate } from "@/lib/utils";
 
 type Props = {
   changes: DraftChange[];
+  store?: StoreSummary | null;
 };
 
 type FilterStatus = "all" | DraftChange["status"];
 
-function formatValue(key: string, value: unknown): string {
+function formatValue(key: string, value: unknown, currencyCode?: string | null): string {
   if (value === null || value === undefined || value === "") return "—";
   if (Array.isArray(value)) return value.length === 0 ? "—" : value.join(", ");
   if (typeof value === "object") return JSON.stringify(value);
   if ((key === "price" || key === "compareAtPrice") && typeof value === "number") {
-    return currency(value);
+    return currency(value, currencyCode);
   }
   return String(value);
 }
@@ -62,7 +63,8 @@ function fieldLabel(key: string): string {
   }
 }
 
-export function DraftsBoard({ changes }: Props) {
+export function DraftsBoard({ changes, store }: Props) {
+  const currencyCode = store?.currencyCode ?? null;
   const router = useRouter();
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -471,7 +473,7 @@ export function DraftsBoard({ changes }: Props) {
                                   {hasBefore ? (
                                     <>
                                       <span className="rounded-md bg-rose-50 px-2 py-0.5 font-mono text-[11px] text-rose-700 line-through">
-                                        {formatValue(key, beforeValue)}
+                                        {formatValue(key, beforeValue, currencyCode)}
                                       </span>
                                       <span className="text-muted">→</span>
                                     </>
@@ -481,7 +483,7 @@ export function DraftsBoard({ changes }: Props) {
                                     </span>
                                   )}
                                   <span className="rounded-md bg-emerald-50 px-2 py-0.5 font-mono text-[11px] text-emerald-700">
-                                    {formatValue(key, afterValue)}
+                                    {formatValue(key, afterValue, currencyCode)}
                                   </span>
                                 </div>
                               </div>

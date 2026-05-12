@@ -30,6 +30,24 @@ const INVENTORY_ADJUST_MUTATION = `
   }
 `;
 
+const PRODUCT_DELETE_MUTATION = `
+  mutation ProductDelete($input: ProductDeleteInput!) {
+    productDelete(input: $input) {
+      deletedProductId
+      userErrors { field message }
+    }
+  }
+`;
+
+const VARIANTS_BULK_DELETE_MUTATION = `
+  mutation ProductVariantsBulkDelete($productId: ID!, $variantsIds: [ID!]!) {
+    productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
+      product { id }
+      userErrors { field message }
+    }
+  }
+`;
+
 type PushResult = {
   ok: boolean;
   message: string;
@@ -314,17 +332,143 @@ async function pushVariantUpdate(draft: DraftRow): Promise<PushResult> {
   return { ok: true, message: `Updated variant ${variant.sku ?? variant.shopifyVariantId} on Shopify.` };
 }
 
+async function pushProductDelete(draft: DraftRow): Promise<PushResult> {
+  const prisma = getPrismaClient();
+  if (!draft.entityId) return { ok: false, message: "Draft has no entityId." };
+
+  const product = await prisma.product.findUnique({ where: { id: draft.entityId } });
+  const shopifyProductId =
+    product?.shopifyProductId ??
+    (typeof draft.shopifyEntityId === "string" ? draft.shopifyEntityId : null);
+  if (!shopifyProductId) {
+    return { ok: false, message: "Product has no Shopify ID. Sync the store first." };
+  }
+
+  const store = await prisma.store.findUnique({ where: { id: draft.storeId } });
+  if (!store?.accessTokenEncrypted) {
+    return { ok: false, message: "Store is not connected or token is missing." };
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = decryptValue(store.accessTokenEncrypted);
+  } catch {
+    return { ok: false, message: "Failed to decrypt access token." };
+  }
+
+  type Resp = {
+    data?: {
+      productDelete?: {
+        deletedProductId?: string | null;
+        userErrors?: Array<{ field: string[] | null; message: string }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  let response: Resp;
+  try {
+    response = await shopifyGraphQLRequest<Resp>({
+      shopDomain: store.shopDomain,
+      accessToken,
+      query: PRODUCT_DELETE_MUTATION,
+      variables: { input: { id: shopifyProductId } }
+    });
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Shopify request failed" };
+  }
+  if (response.errors?.length) {
+    return { ok: false, message: response.errors.map((e) => e.message).join("; ") };
+  }
+  const userErrors = response.data?.productDelete?.userErrors ?? [];
+  if (userErrors.length) {
+    return { ok: false, message: userErrors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`).join("; ") };
+  }
+
+  if (product) {
+    await prisma.variantImage.deleteMany({ where: { productId: product.id } });
+    await prisma.productImage.deleteMany({ where: { productId: product.id } });
+    await prisma.variant.deleteMany({ where: { productId: product.id } });
+    await prisma.product.delete({ where: { id: product.id } });
+  }
+
+  return { ok: true, message: `Deleted ${product?.handle ?? shopifyProductId} on Shopify.` };
+}
+
+async function pushVariantDelete(draft: DraftRow): Promise<PushResult> {
+  const prisma = getPrismaClient();
+  if (!draft.entityId) return { ok: false, message: "Variant draft has no entityId." };
+
+  const variant = await prisma.variant.findUnique({ where: { id: draft.entityId } });
+  const shopifyVariantId =
+    variant?.shopifyVariantId ??
+    (typeof draft.shopifyEntityId === "string" ? draft.shopifyEntityId : null);
+  if (!shopifyVariantId) {
+    return { ok: false, message: "Variant has no Shopify ID. Sync the store first." };
+  }
+
+  const product = variant ? await prisma.product.findUnique({ where: { id: variant.productId } }) : null;
+  if (!product?.shopifyProductId) {
+    return { ok: false, message: "Parent product not synced to Shopify." };
+  }
+
+  const store = await prisma.store.findUnique({ where: { id: draft.storeId } });
+  if (!store?.accessTokenEncrypted) {
+    return { ok: false, message: "Store is not connected or token is missing." };
+  }
+
+  let accessToken: string;
+  try {
+    accessToken = decryptValue(store.accessTokenEncrypted);
+  } catch {
+    return { ok: false, message: "Failed to decrypt access token." };
+  }
+
+  type Resp = {
+    data?: {
+      productVariantsBulkDelete?: {
+        userErrors?: Array<{ field: string[] | null; message: string }>;
+      };
+    };
+    errors?: Array<{ message: string }>;
+  };
+
+  let response: Resp;
+  try {
+    response = await shopifyGraphQLRequest<Resp>({
+      shopDomain: store.shopDomain,
+      accessToken,
+      query: VARIANTS_BULK_DELETE_MUTATION,
+      variables: { productId: product.shopifyProductId, variantsIds: [shopifyVariantId] }
+    });
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Shopify request failed" };
+  }
+  if (response.errors?.length) {
+    return { ok: false, message: response.errors.map((e) => e.message).join("; ") };
+  }
+  const userErrors = response.data?.productVariantsBulkDelete?.userErrors ?? [];
+  if (userErrors.length) {
+    return { ok: false, message: userErrors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`).join("; ") };
+  }
+
+  if (variant) {
+    await prisma.variantImage.deleteMany({ where: { variantId: variant.id } });
+    await prisma.variant.delete({ where: { id: variant.id } });
+  }
+
+  return { ok: true, message: `Deleted variant ${variant?.sku ?? shopifyVariantId} on Shopify.` };
+}
+
 export async function pushDraftToShopify(draftId: number): Promise<PushResult> {
   const prisma = getPrismaClient();
   const draft = (await prisma.draftChange.findUnique({ where: { id: BigInt(draftId) } })) as DraftRow | null;
   if (!draft) return { ok: false, message: "Draft not found." };
 
-  if (draft.entityType === "product" && draft.changeType === "update") {
-    return pushProductUpdate(draft);
-  }
-  if (draft.entityType === "variant" && draft.changeType === "update") {
-    return pushVariantUpdate(draft);
-  }
+  if (draft.entityType === "product" && draft.changeType === "update") return pushProductUpdate(draft);
+  if (draft.entityType === "variant" && draft.changeType === "update") return pushVariantUpdate(draft);
+  if (draft.entityType === "product" && draft.changeType === "delete") return pushProductDelete(draft);
+  if (draft.entityType === "variant" && draft.changeType === "delete") return pushVariantDelete(draft);
 
   return {
     ok: false,

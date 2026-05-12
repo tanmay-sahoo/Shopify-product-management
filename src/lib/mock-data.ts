@@ -27,7 +27,8 @@ export const store: StoreSummary = {
     "read_locations",
     "read_metafields",
     "write_metafields"
-  ]
+  ],
+  currencyCode: "USD"
 };
 
 export const products: Product[] = [

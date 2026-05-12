@@ -3,12 +3,13 @@
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/badge";
-import type { Product, Variant } from "@/lib/types";
+import type { Product, StoreSummary, Variant } from "@/lib/types";
 import { currency, formatDate } from "@/lib/utils";
 
 type Props = {
   variants: Variant[];
   products?: Product[];
+  store?: StoreSummary | null;
 };
 
 const priceBuckets = [
@@ -27,7 +28,8 @@ function withinBucket(price: number, bucket: string) {
   return price >= min && price < max;
 }
 
-export function VariantTable({ variants, products = [] }: Props) {
+export function VariantTable({ variants, products = [], store }: Props) {
+  const currencyCode = store?.currencyCode ?? null;
   const [query, setQuery] = useState("");
   const [productFilter, setProductFilter] = useState("");
   const [priceFilter, setPriceFilter] = useState("");
@@ -102,12 +104,12 @@ export function VariantTable({ variants, products = [] }: Props) {
         {filtered.length} of {variants.length} variants
       </div>
 
-      <div className="overflow-x-auto">
+      <div className="max-h-[70vh] overflow-auto">
         {filtered.length === 0 ? (
           <div className="px-6 py-10 text-sm text-muted">No variants match this filter.</div>
         ) : null}
         <table className="min-w-full text-left text-sm">
-          <thead className="bg-slate-50 text-muted">
+          <thead className="sticky top-0 z-20 bg-slate-50/95 text-muted shadow-[0_1px_0_0_rgba(15,23,42,0.06)] backdrop-blur">
             <tr>
               {["Variant", "SKU", "Option 1", "Option 2", "Price", "Compare", "Inventory", "Status", "Updated"].map(
                 (label) => (
@@ -140,9 +142,9 @@ export function VariantTable({ variants, products = [] }: Props) {
                 <td className="px-6 py-5 text-muted">{variant.sku}</td>
                 <td className="px-6 py-5 text-muted">{variant.option1Value}</td>
                 <td className="px-6 py-5 text-muted">{variant.option2Value ?? "-"}</td>
-                <td className="px-6 py-5 text-muted">{currency(variant.price)}</td>
+                <td className="px-6 py-5 text-muted">{currency(variant.price, currencyCode)}</td>
                 <td className="px-6 py-5 text-muted">
-                  {variant.compareAtPrice ? currency(variant.compareAtPrice) : "-"}
+                  {variant.compareAtPrice ? currency(variant.compareAtPrice, currencyCode) : "-"}
                 </td>
                 <td className="px-6 py-5 text-muted">{variant.inventoryQuantity}</td>
                 <td className="px-6 py-5">

@@ -25,6 +25,13 @@ async function bootstrap() {
     console.info("[schema-bootstrap] added Store.displayName column");
   }
 
+  if (!(await columnExists("Store", "currencyCode"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `Store` ADD COLUMN `currencyCode` VARCHAR(3) NULL"
+    );
+    console.info("[schema-bootstrap] added Store.currencyCode column");
+  }
+
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS \`ShopifyAppCredential\` (
       \`id\` BIGINT NOT NULL AUTO_INCREMENT,
@@ -36,6 +43,54 @@ async function bootstrap() {
       \`updatedAt\` DATETIME(3) NOT NULL,
       PRIMARY KEY (\`id\`),
       UNIQUE INDEX \`ShopifyAppCredential_clientId_key\` (\`clientId\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`InventorySyncGroup\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`name\` VARCHAR(255) NOT NULL,
+      \`mode\` ENUM('mirror','shared_pool','bundle') NOT NULL,
+      \`syncStock\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`syncPrice\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`active\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`lastSyncedAt\` DATETIME(3) NULL,
+      \`lastError\` TEXT NULL,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`InventorySyncGroup_storeId_idx\` (\`storeId\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`InventorySyncGroupItem\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`groupId\` BIGINT NOT NULL,
+      \`storeId\` BIGINT NOT NULL,
+      \`productId\` BIGINT NULL,
+      \`variantId\` BIGINT NULL,
+      \`shopifyProductId\` VARCHAR(255) NULL,
+      \`shopifyVariantId\` VARCHAR(255) NOT NULL,
+      \`inventoryItemId\` VARCHAR(255) NULL,
+      \`locationId\` VARCHAR(255) NULL,
+      \`role\` ENUM('source','target','component','combo','member') NOT NULL,
+      \`quantityRequired\` INT NOT NULL DEFAULT 1,
+      \`stockBuffer\` INT NOT NULL DEFAULT 0,
+      \`priceMultiplier\` DECIMAL(12,4) NOT NULL DEFAULT 1,
+      \`syncStock\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`syncPrice\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`active\` TINYINT(1) NOT NULL DEFAULT 1,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`InventorySyncGroupItem_groupId_idx\` (\`groupId\`),
+      INDEX \`InventorySyncGroupItem_storeId_idx\` (\`storeId\`),
+      INDEX \`InventorySyncGroupItem_shopifyVariantId_idx\` (\`shopifyVariantId\`),
+      INDEX \`InventorySyncGroupItem_inventoryItemId_idx\` (\`inventoryItemId\`),
+      CONSTRAINT \`InventorySyncGroupItem_groupId_fkey\` FOREIGN KEY (\`groupId\`)
+        REFERENCES \`InventorySyncGroup\` (\`id\`) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 }

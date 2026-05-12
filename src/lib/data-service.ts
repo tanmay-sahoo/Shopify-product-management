@@ -1,7 +1,17 @@
+import { Prisma } from "@prisma/client";
+
 import { readActiveStoreId } from "@/lib/active-store";
 import { getPrismaClient } from "@/lib/prisma";
 import { ensureSchemaCompatibility } from "@/lib/schema-bootstrap";
 import type { DraftChange, ImportSummary, Product, StoreSummary, SyncLog, Variant } from "@/lib/types";
+
+async function loadCurrencyCodes(storeIds: bigint[]): Promise<Map<string, string | null>> {
+  if (storeIds.length === 0) return new Map();
+  const rows = await getPrismaClient().$queryRaw<{ id: bigint; currencyCode: string | null }[]>(
+    Prisma.sql`SELECT \`id\`, \`currencyCode\` FROM \`Store\` WHERE \`id\` IN (${Prisma.join(storeIds)})`
+  );
+  return new Map(rows.map((row) => [String(row.id), row.currencyCode]));
+}
 
 function summariseDraft(
   entityType: string,
@@ -32,6 +42,7 @@ function mapStore(record: {
   updatedAt: Date;
   createdAt: Date;
   scopes: string | null;
+  currencyCode?: string | null;
 }): StoreSummary {
   return {
     id: Number(record.id),
@@ -40,7 +51,8 @@ function mapStore(record: {
     status: record.status,
     installedAt: (record.installedAt ?? record.createdAt).toISOString(),
     lastSyncAt: (record.lastSyncAt ?? record.updatedAt).toISOString(),
-    scopes: record.scopes ? record.scopes.split(",").filter(Boolean) : []
+    scopes: record.scopes ? record.scopes.split(",").filter(Boolean) : [],
+    currencyCode: record.currencyCode ?? null
   };
 }
 
@@ -73,7 +85,8 @@ export async function listConnectedStores(): Promise<StoreSummary[]> {
       where: { status: { not: "uninstalled" } },
       orderBy: { installedAt: "desc" }
     });
-    return rows.map(mapStore);
+    const currencies = await loadCurrencyCodes(rows.map((row) => row.id));
+    return rows.map((row) => mapStore({ ...row, currencyCode: currencies.get(String(row.id)) ?? null }));
   } catch {
     return [];
   }
@@ -311,7 +324,10 @@ export async function getDashboardData(): Promise<DashboardData> {
       message: log.message ?? "",
       createdAt: log.createdAt.toISOString()
     })),
-    store: mapStore(connectedStore),
+    store: mapStore({
+      ...connectedStore,
+      currencyCode: (await loadCurrencyCodes([connectedStore.id])).get(String(connectedStore.id)) ?? null
+    }),
     stores: allStores
   };
 }

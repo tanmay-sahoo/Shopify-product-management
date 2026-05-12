@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { getPrismaClient } from "@/lib/prisma";
 import { decryptValue } from "@/lib/oauth";
-import { PRODUCTS_SYNC_QUERY, shopifyGraphQLRequest } from "@/lib/shopify";
+import { PRODUCTS_SYNC_QUERY, fetchShopInfo, shopifyGraphQLRequest } from "@/lib/shopify";
 
 type ShopifyProductsResponse = {
   data?: {
@@ -86,6 +86,14 @@ export async function syncStoreCatalog(storeId: bigint | number) {
   }
 
   const accessToken = decryptValue(store.accessTokenEncrypted);
+
+  const shopInfo = await fetchShopInfo(store.shopDomain, accessToken);
+  if (shopInfo?.currencyCode && shopInfo.currencyCode !== (store as { currencyCode?: string | null }).currencyCode) {
+    await db.$executeRaw(
+      Prisma.sql`UPDATE \`Store\` SET \`currencyCode\` = ${shopInfo.currencyCode} WHERE \`id\` = ${store.id}`
+    );
+  }
+
   let cursor: string | null = null;
   let hasNextPage = true;
   let syncedProducts = 0;

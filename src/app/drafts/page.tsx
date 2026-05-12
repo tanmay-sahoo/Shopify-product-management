@@ -13,7 +13,7 @@ export default async function DraftsPage() {
         title="Draft Changes"
         description="Approve or reject staged changes before pushing them to Shopify. Use bulk select to approve and push many at once."
       />
-      {store ? <DraftsBoard changes={draftChanges} /> : <NoStoreConnected />}
+      {store ? <DraftsBoard changes={draftChanges} store={store} /> : <NoStoreConnected />}
     </DashboardShell>
   );
 }

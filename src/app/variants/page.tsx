@@ -13,7 +13,7 @@ export default async function VariantsPage() {
         title="Variants"
         description="Focused workspace for SKU-level edits, price and inventory updates, duplicate SKU checks, and variant image assignments."
       />
-      {store ? <VariantTable variants={variants} products={products} /> : <NoStoreConnected />}
+      {store ? <VariantTable variants={variants} products={products} store={store} /> : <NoStoreConnected />}
     </DashboardShell>
   );
 }

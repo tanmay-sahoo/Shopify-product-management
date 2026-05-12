@@ -11,11 +11,13 @@ export function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-export function currency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD"
-  }).format(value);
+export function currency(value: number, currencyCode?: string | null) {
+  const code = (currencyCode ?? "USD").toUpperCase();
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: code }).format(value);
+  } catch {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD" }).format(value);
+  }
 }
 
 export function slugify(input: string) {

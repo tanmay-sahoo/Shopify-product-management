@@ -4,6 +4,13 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { decryptValue } from "@/lib/oauth";
 import { getPrismaClient } from "@/lib/prisma";
+import {
+  handleInventoryLevelUpdate,
+  handleOrderCancelled,
+  handleOrderCreate,
+  handleProductUpdate,
+  handleRefundCreate
+} from "@/lib/inventory-sync/webhook-dispatcher";
 
 function verifyHmac(body: string, signature: string, secret: string) {
   const digest = crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
@@ -264,6 +271,13 @@ export async function POST(request: NextRequest) {
       case "products/create":
       case "products/update": {
         outcome = await upsertProductFromWebhook(store.id, payload as RestProduct);
+        const linkedOutcome = await handleProductUpdate(
+          Number(store.id),
+          payload as { id?: number; variants?: Array<{ id?: number; price?: string }> }
+        );
+        if (linkedOutcome.matched > 0) {
+          (outcome as Record<string, unknown>).linkedSync = linkedOutcome;
+        }
         break;
       }
       case "products/delete": {
@@ -274,7 +288,34 @@ export async function POST(request: NextRequest) {
         break;
       }
       case "inventory_levels/update": {
-        outcome = await applyInventoryUpdate(store.id, payload as InventoryLevelPayload);
+        const baseOutcome = await applyInventoryUpdate(store.id, payload as InventoryLevelPayload);
+        const linked = await handleInventoryLevelUpdate(
+          Number(store.id),
+          payload as Parameters<typeof handleInventoryLevelUpdate>[1]
+        );
+        outcome = { ...baseOutcome, linkedSync: linked };
+        break;
+      }
+      case "orders/create":
+      case "orders/paid": {
+        outcome = await handleOrderCreate(
+          Number(store.id),
+          payload as Parameters<typeof handleOrderCreate>[1]
+        );
+        break;
+      }
+      case "orders/cancelled": {
+        outcome = await handleOrderCancelled(
+          Number(store.id),
+          payload as Parameters<typeof handleOrderCancelled>[1]
+        );
+        break;
+      }
+      case "refunds/create": {
+        outcome = await handleRefundCreate(
+          Number(store.id),
+          payload as Parameters<typeof handleRefundCreate>[1]
+        );
         break;
       }
       default: {
