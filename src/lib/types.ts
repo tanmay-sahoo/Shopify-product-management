@@ -112,6 +112,18 @@ export type DraftChange = {
   beforeData: Record<string, unknown> | null;
   afterData: Record<string, unknown> | null;
   createdAt: string;
+  product?: {
+    id: number;
+    title: string;
+    handle: string;
+    imageSrc: string | null;
+  } | null;
+  variant?: {
+    id: number;
+    title: string;
+    sku: string;
+    options: string[];
+  } | null;
 };
 
 export type DashboardStats = {

@@ -181,5 +181,34 @@ export async function GET(request: NextRequest) {
     console.error("[shopify callback] failed to set active store cookie:", error);
   }
 
+  void registerProductWebhooks(shop, tokenResponse.access_token, request).catch((error) => {
+    console.warn("[shopify callback] webhook registration skipped:", error?.message ?? error);
+  });
+
   return response;
+}
+
+async function registerProductWebhooks(shop: string, accessToken: string, request: NextRequest) {
+  const callbackUrl = process.env.SHOPIFY_WEBHOOK_URL?.trim();
+  const fallback = `${new URL(request.url).origin}/api/webhooks/shopify/products`;
+  const target = callbackUrl && callbackUrl.length > 0 ? callbackUrl : fallback;
+
+  if (target.includes("localhost") || target.includes("127.0.0.1")) {
+    console.info("[shopify callback] skipping webhook registration for local URL:", target);
+    return;
+  }
+
+  const topics = ["products/update", "products/create", "products/delete", "inventory_levels/update"];
+  for (const topic of topics) {
+    await fetch(`https://${shop}/admin/api/2025-10/webhooks.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": accessToken
+      },
+      body: JSON.stringify({
+        webhook: { topic, address: target, format: "json" }
+      })
+    });
+  }
 }

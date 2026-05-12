@@ -41,6 +41,7 @@ type ShopifyProductsResponse = {
                 compareAtPrice: string | null;
                 inventoryQuantity: number | null;
                 updatedAt: string;
+                inventoryItem?: { id: string | null } | null;
               };
             }>;
           };
@@ -196,6 +197,7 @@ export async function syncStoreCatalog(storeId: bigint | number) {
             price: variantNode.price ? Number(variantNode.price) : null,
             compareAtPrice: variantNode.compareAtPrice ? Number(variantNode.compareAtPrice) : null,
             inventoryQuantity: variantNode.inventoryQuantity ?? 0,
+            inventoryItemId: variantNode.inventoryItem?.id ?? null,
             rawShopifyJson: variantNode as unknown as Prisma.InputJsonValue
           }
         });

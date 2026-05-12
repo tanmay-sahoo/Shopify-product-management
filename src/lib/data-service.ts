@@ -177,6 +177,32 @@ export async function getDashboardData(): Promise<DashboardData> {
   }));
 
   const liveVariants = liveProducts.flatMap((product) => product.variants);
+
+  const productDraftIds = connectedStore.draftChanges
+    .filter((d) => d.entityType === "product" && d.entityId !== null)
+    .map((d) => d.entityId!) as bigint[];
+  const variantDraftIds = connectedStore.draftChanges
+    .filter((d) => d.entityType === "variant" && d.entityId !== null)
+    .map((d) => d.entityId!) as bigint[];
+
+  const draftProducts = productDraftIds.length
+    ? await db.product.findMany({
+        where: { id: { in: productDraftIds } },
+        include: { productImages: { orderBy: { position: "asc" }, take: 1 } }
+      })
+    : [];
+  const draftVariants = variantDraftIds.length
+    ? await db.variant.findMany({
+        where: { id: { in: variantDraftIds } },
+        include: {
+          product: { include: { productImages: { orderBy: { position: "asc" }, take: 1 } } }
+        }
+      })
+    : [];
+
+  const draftProductById = new Map(draftProducts.map((p) => [Number(p.id), p]));
+  const draftVariantById = new Map(draftVariants.map((v) => [Number(v.id), v]));
+
   const latestImport = connectedStore.imports[0];
   const parsedImportRows = latestImport
     ? latestImport.rows.map((row) => ({
@@ -230,16 +256,52 @@ export async function getDashboardData(): Promise<DashboardData> {
       const after = (change.afterData ?? null) as Record<string, unknown> | null;
       const before = (change.beforeData ?? null) as Record<string, unknown> | null;
       const summary = summariseDraft(change.entityType, change.changeType, before, after);
+      const entityIdNum = change.entityId ? Number(change.entityId) : null;
+
+      let productInfo = null;
+      let variantInfo = null;
+      if (change.entityType === "product" && entityIdNum !== null) {
+        const product = draftProductById.get(entityIdNum);
+        if (product) {
+          productInfo = {
+            id: Number(product.id),
+            title: product.title ?? "",
+            handle: product.handle ?? "",
+            imageSrc: product.productImages[0]?.sourceUrl ?? null
+          };
+        }
+      } else if (change.entityType === "variant" && entityIdNum !== null) {
+        const variant = draftVariantById.get(entityIdNum);
+        if (variant) {
+          productInfo = {
+            id: Number(variant.product.id),
+            title: variant.product.title ?? "",
+            handle: variant.product.handle ?? "",
+            imageSrc: variant.product.productImages[0]?.sourceUrl ?? null
+          };
+          variantInfo = {
+            id: Number(variant.id),
+            title: variant.title ?? "",
+            sku: variant.sku ?? "",
+            options: [variant.option1Value, variant.option2Value, variant.option3Value].filter(
+              (value): value is string => Boolean(value && value.length > 0)
+            )
+          };
+        }
+      }
+
       return {
         id: Number(change.id),
         entityType: change.entityType,
         changeType: change.changeType,
         status: change.status,
         summary,
-        entityId: change.entityId ? Number(change.entityId) : null,
+        entityId: entityIdNum,
         beforeData: before,
         afterData: after,
-        createdAt: change.createdAt.toISOString()
+        createdAt: change.createdAt.toISOString(),
+        product: productInfo,
+        variant: variantInfo
       };
     }),
     syncLogs: connectedStore.syncLogs.map((log) => ({

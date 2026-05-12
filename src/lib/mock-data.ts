@@ -265,7 +265,9 @@ export const draftChanges: DraftChange[] = [
     entityId: 501,
     beforeData: { price: 18.99 },
     afterData: { price: 19.99 },
-    createdAt: "2026-05-12T08:10:00.000Z"
+    createdAt: "2026-05-12T08:10:00.000Z",
+    product: null,
+    variant: null
   },
   {
     id: 78,
@@ -276,7 +278,9 @@ export const draftChanges: DraftChange[] = [
     entityId: 503,
     beforeData: null,
     afterData: { imagesAttached: 3 },
-    createdAt: "2026-05-12T08:22:00.000Z"
+    createdAt: "2026-05-12T08:22:00.000Z",
+    product: null,
+    variant: null
   }
 ];
 

@@ -1,12 +1,13 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { StoreSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STORAGE_KEY = "lns_auto_sync";
+const SMART_SYNC_STALE_MIN = 10;
 
 type Settings = {
   enabled: boolean;
@@ -38,6 +39,7 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
   const [running, setRunning] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastRunRef = useRef<number>(0);
 
   useEffect(() => {
     setSettings(readSettings());
@@ -49,22 +51,26 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
     }
   }, [settings]);
 
-  const runSync = useMemo(
-    () =>
-      async () => {
-        if (!store?.id || running) return;
-        setRunning(true);
-        try {
-          const response = await fetch(`/api/stores/${store.id}/sync`, { method: "POST" });
-          if (response.ok) {
-            setLastRun(Date.now());
-            router.refresh();
-          }
-        } finally {
-          setRunning(false);
+  const runSync = useCallback(
+    async (reason: "manual" | "interval" | "smart" = "manual") => {
+      if (!store?.id) return;
+      if (Date.now() - lastRunRef.current < 5_000) return;
+      lastRunRef.current = Date.now();
+      setRunning(true);
+      try {
+        const response = await fetch(`/api/stores/${store.id}/sync`, { method: "POST" });
+        if (response.ok) {
+          setLastRun(Date.now());
+          router.refresh();
         }
-      },
-    [router, running, store?.id]
+      } catch {
+        // ignore — surfaces in sync logs
+      } finally {
+        setRunning(false);
+        void reason;
+      }
+    },
+    [router, store?.id]
   );
 
   useEffect(() => {
@@ -74,11 +80,47 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
     }
     if (!settings.enabled) return;
     const ms = settings.intervalMin * 60 * 1000;
-    intervalRef.current = setInterval(runSync, ms);
+    intervalRef.current = setInterval(() => runSync("interval"), ms);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [settings.enabled, settings.intervalMin, runSync]);
+
+  const lastSyncMs = useMemo(() => {
+    if (!store?.lastSyncAt) return null;
+    const ms = new Date(store.lastSyncAt).getTime();
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }, [store?.lastSyncAt]);
+
+  const isStale = useMemo(() => {
+    if (!lastSyncMs) return true;
+    return Date.now() - lastSyncMs > SMART_SYNC_STALE_MIN * 60 * 1000;
+  }, [lastSyncMs]);
+
+  useEffect(() => {
+    if (!store?.id) return;
+    if (isStale && !running) {
+      void runSync("smart");
+    }
+  }, [store?.id, isStale, running, runSync]);
+
+  useEffect(() => {
+    function onVisibility() {
+      if (document.visibilityState !== "visible") return;
+      if (!store?.id) return;
+      if (Date.now() - lastRunRef.current < 30_000) return;
+      const last = lastSyncMs ?? 0;
+      if (Date.now() - last > SMART_SYNC_STALE_MIN * 60 * 1000) {
+        void runSync("smart");
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("focus", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("focus", onVisibility);
+    };
+  }, [lastSyncMs, runSync, store?.id]);
 
   useEffect(() => {
     if (!open) return;
@@ -103,20 +145,25 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
         <span
           className={cn(
             "h-1.5 w-1.5 rounded-full",
-            settings.enabled ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
+            running
+              ? "bg-brand animate-pulse"
+              : settings.enabled
+              ? "bg-emerald-500 animate-pulse"
+              : "bg-slate-400"
           )}
         />
-        Auto-sync {settings.enabled ? `· ${settings.intervalMin}m` : "off"}
+        {running ? "Syncing…" : `Auto-sync ${settings.enabled ? `· ${settings.intervalMin}m` : "off"}`}
       </button>
       {open ? (
-        <div className="absolute right-0 z-40 mt-2 w-72 rounded-2xl border border-line bg-white p-4 shadow-panel">
+        <div className="absolute right-0 z-40 mt-2 w-80 rounded-2xl border border-line bg-white p-4 shadow-panel">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Auto-sync</p>
           <p className="mt-1 text-xs leading-5 text-muted">
-            Re-pull this store's products on an interval. Set to off to sync manually.
+            Background sync runs when the data is older than {SMART_SYNC_STALE_MIN} min and you focus this tab. Enable
+            the periodic toggle for fixed-interval polling on top of that.
           </p>
 
           <label className="mt-4 flex items-center justify-between">
-            <span className="text-sm font-medium text-ink">Enable</span>
+            <span className="text-sm font-medium text-ink">Periodic sync</span>
             <input
               type="checkbox"
               checked={settings.enabled}
@@ -148,7 +195,7 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
           </div>
 
           <button
-            onClick={runSync}
+            onClick={() => void runSync("manual")}
             disabled={running}
             className="mt-4 w-full rounded-xl border border-line bg-canvas px-3 py-2 text-xs font-semibold text-ink hover:bg-white disabled:opacity-50"
           >
@@ -162,8 +209,9 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
           ) : null}
 
           <p className="mt-3 rounded-xl bg-canvas px-3 py-2 text-[11px] leading-5 text-muted">
-            Production tip: register Shopify webhooks for `products/update` and `inventory_levels/update`
-            to get push-based updates without polling.
+            For real push-based updates from Shopify, register webhooks (this app exposes a handler at
+            <code className="mx-1 font-mono">/api/webhooks/shopify/products</code>) — they need a public URL,
+            so set up ngrok or deploy first.
           </p>
         </div>
       ) : null}

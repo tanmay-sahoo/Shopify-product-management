@@ -6,7 +6,8 @@ const PUBLIC_PATH_PREFIXES = [
   "/login",
   "/api/auth/login",
   "/api/auth/logout",
-  "/api/auth/shopify/callback"
+  "/api/auth/shopify/callback",
+  "/api/webhooks/"
 ];
 
 export async function middleware(request: NextRequest) {

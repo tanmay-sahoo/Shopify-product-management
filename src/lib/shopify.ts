@@ -86,6 +86,9 @@ export const PRODUCTS_SYNC_QUERY = `
                 compareAtPrice
                 inventoryQuantity
                 updatedAt
+                inventoryItem {
+                  id
+                }
               }
             }
           }
