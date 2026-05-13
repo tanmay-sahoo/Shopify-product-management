@@ -91,6 +91,124 @@ const MEDIA_STATUS_QUERY = `
   }
 `;
 
+const PRODUCT_MEDIA_QUERY = `
+  query ProductMedia($id: ID!) {
+    product(id: $id) {
+      media(first: 250) {
+        edges {
+          node {
+            id
+            ... on MediaImage { image { url } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const PRODUCT_VARIANTS_MEDIA_QUERY = `
+  query ProductVariantsMedia($id: ID!) {
+    product(id: $id) {
+      variants(first: 250) {
+        edges {
+          node {
+            id
+            media(first: 50) { edges { node { id } } }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// Shopify CDN URLs preserve the original filename, so we match existing media
+// by filename (last path segment) to avoid re-uploading the same image on
+// subsequent pushes of the same product.
+function filenameOf(url: string): string {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    const last = u.pathname.split("/").pop() ?? "";
+    return last.split("?")[0].toLowerCase();
+  } catch {
+    const last = url.split("/").pop() ?? "";
+    return last.split("?")[0].toLowerCase();
+  }
+}
+
+async function fetchVariantMediaMap(
+  auth: ShopAuth,
+  productId: string
+): Promise<Map<string, Set<string>>> {
+  type Resp = {
+    data?: {
+      product?: {
+        variants?: {
+          edges?: Array<{
+            node: {
+              id: string;
+              media?: { edges?: Array<{ node: { id: string } }> } | null;
+            };
+          }>;
+        } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  const out = new Map<string, Set<string>>();
+  try {
+    const resp = await shopifyGraphQLRequest<Resp>({
+      shopDomain: auth.shopDomain,
+      accessToken: auth.accessToken,
+      query: PRODUCT_VARIANTS_MEDIA_QUERY,
+      variables: { id: productId }
+    });
+    for (const edge of resp.data?.product?.variants?.edges ?? []) {
+      const ids = new Set<string>();
+      for (const m of edge.node.media?.edges ?? []) {
+        if (m.node.id) ids.add(m.node.id);
+      }
+      out.set(edge.node.id, ids);
+    }
+  } catch {
+    // best-effort
+  }
+  return out;
+}
+
+async function fetchExistingMediaByFilename(
+  auth: ShopAuth,
+  productId: string
+): Promise<Map<string, string>> {
+  type Resp = {
+    data?: {
+      product?: {
+        media?: {
+          edges?: Array<{ node: { id: string; image?: { url?: string | null } | null } }>;
+        } | null;
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  const out = new Map<string, string>();
+  try {
+    const resp = await shopifyGraphQLRequest<Resp>({
+      shopDomain: auth.shopDomain,
+      accessToken: auth.accessToken,
+      query: PRODUCT_MEDIA_QUERY,
+      variables: { id: productId }
+    });
+    for (const edge of resp.data?.product?.media?.edges ?? []) {
+      const url = edge.node.image?.url ?? "";
+      const name = filenameOf(url);
+      if (name && !out.has(name)) out.set(name, edge.node.id);
+    }
+  } catch {
+    // best-effort — on failure we just skip dedupe (old behavior).
+  }
+  return out;
+}
+
 // Shopify processes media (downloads from URL, generates renditions) async.
 // Returns the set of media IDs that reach status=READY within the timeout.
 async function waitForMediaReady(
@@ -453,40 +571,55 @@ async function pushOneProduct(
   }
 
   if (orderedUrls.length > 0) {
-    type Resp = {
-      data?: {
-        productCreateMedia?: {
-          media?: Array<{ id: string; image?: { url: string | null } | null } | null>;
-          mediaUserErrors?: Array<{ field: string[] | null; message: string }>;
-        };
-      };
-      errors?: Array<{ message: string }>;
-    };
-    const mediaInputs = orderedUrls.map((url) => ({
-      originalSource: url,
-      alt: altTextByUrl.get(url) ?? "",
-      mediaContentType: "IMAGE"
-    }));
-    const resp = await shopifyGraphQLRequest<Resp>({
-      shopDomain: auth.shopDomain,
-      accessToken: auth.accessToken,
-      query: PRODUCT_CREATE_MEDIA,
-      variables: { productId, media: mediaInputs }
-    });
-    if (resp.errors?.length || resp.data?.productCreateMedia?.mediaUserErrors?.length) {
-      const issues = [
-        ...(resp.errors?.map((e) => e.message) ?? []),
-        ...(resp.data?.productCreateMedia?.mediaUserErrors?.map(
-          (e) => `${(e.field ?? []).join(".")}: ${e.message}`
-        ) ?? [])
-      ].join("; ");
-      console.warn(`[import-push] productCreateMedia issues for ${product.handle}: ${issues}`);
+    // Reuse media that's already attached to this product (matched by filename)
+    // so re-pushing the same product doesn't accumulate duplicates.
+    const existingByFilename = await fetchExistingMediaByFilename(auth, productId);
+    const urlsToUpload: string[] = [];
+    for (const url of orderedUrls) {
+      const existingId = existingByFilename.get(filenameOf(url));
+      if (existingId) {
+        mediaIdBySourceUrl.set(url, existingId);
+      } else {
+        urlsToUpload.push(url);
+      }
     }
-    const returned = resp.data?.productCreateMedia?.media ?? [];
-    mediaInputs.forEach((input, idx) => {
-      const node = returned[idx];
-      if (node?.id) mediaIdBySourceUrl.set(input.originalSource, node.id);
-    });
+
+    if (urlsToUpload.length > 0) {
+      type Resp = {
+        data?: {
+          productCreateMedia?: {
+            media?: Array<{ id: string; image?: { url: string | null } | null } | null>;
+            mediaUserErrors?: Array<{ field: string[] | null; message: string }>;
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      const mediaInputs = urlsToUpload.map((url) => ({
+        originalSource: url,
+        alt: altTextByUrl.get(url) ?? "",
+        mediaContentType: "IMAGE"
+      }));
+      const resp = await shopifyGraphQLRequest<Resp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: PRODUCT_CREATE_MEDIA,
+        variables: { productId, media: mediaInputs }
+      });
+      if (resp.errors?.length || resp.data?.productCreateMedia?.mediaUserErrors?.length) {
+        const issues = [
+          ...(resp.errors?.map((e) => e.message) ?? []),
+          ...(resp.data?.productCreateMedia?.mediaUserErrors?.map(
+            (e) => `${(e.field ?? []).join(".")}: ${e.message}`
+          ) ?? [])
+        ].join("; ");
+        console.warn(`[import-push] productCreateMedia issues for ${product.handle}: ${issues}`);
+      }
+      const returned = resp.data?.productCreateMedia?.media ?? [];
+      mediaInputs.forEach((input, idx) => {
+        const node = returned[idx];
+        if (node?.id) mediaIdBySourceUrl.set(input.originalSource, node.id);
+      });
+    }
     imagesCreated = mediaIdBySourceUrl.size;
   }
 
@@ -532,13 +665,27 @@ async function pushOneProduct(
 
   let variantImagesAttached = 0;
   if (variantMediaAssignments.length > 0) {
+    // Skip assignments whose target media is already linked to the variant —
+    // productVariantAppendMedia is not idempotent and would create duplicate
+    // variant-image links on repeated pushes.
+    const existingVariantMedia = await fetchVariantMediaMap(auth, productId);
+    const filteredAssignments = variantMediaAssignments.filter((v) => {
+      const existing = existingVariantMedia.get(v.variantId);
+      if (!existing) return true;
+      return !v.mediaIds.every((id) => existing.has(id));
+    });
+
+    if (filteredAssignments.length === 0) {
+      // Nothing new to attach — every variant already has its image.
+    }
+
     // Wait for the relevant media items to finish Shopify-side processing
     // before attaching them to variants.
     const neededMediaIds = Array.from(
-      new Set(variantMediaAssignments.flatMap((v) => v.mediaIds))
+      new Set(filteredAssignments.flatMap((v) => v.mediaIds))
     );
-    const readyIds = await waitForMediaReady(auth, neededMediaIds);
-    const readyAssignments = variantMediaAssignments.filter((v) =>
+    const readyIds = neededMediaIds.length > 0 ? await waitForMediaReady(auth, neededMediaIds) : new Set<string>();
+    const readyAssignments = filteredAssignments.filter((v) =>
       v.mediaIds.every((id) => readyIds.has(id))
     );
 
