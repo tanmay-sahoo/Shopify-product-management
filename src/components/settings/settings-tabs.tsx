@@ -5,11 +5,12 @@ import { useState } from "react";
 import { ConnectStoreTab } from "@/components/settings/connect-store-tab";
 import { CredentialsTab } from "@/components/settings/credentials-tab";
 import { StoresListTab } from "@/components/settings/stores-list-tab";
+import { SyncTab } from "@/components/settings/sync-tab";
 import { UsersTab } from "@/components/settings/users-tab";
 import type { StoreSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type Tab = "stores" | "connect" | "credentials" | "users";
+type Tab = "stores" | "connect" | "credentials" | "sync" | "users";
 
 type Props = {
   stores: StoreSummary[];
@@ -29,6 +30,7 @@ export function SettingsTabs(props: Props) {
     { key: "stores", label: "Stores", count: props.stores.length },
     { key: "connect", label: "Connect Store" },
     { key: "credentials", label: "App Credentials" },
+    { key: "sync", label: "Sync" },
     { key: "users", label: "Users" }
   ];
 
@@ -79,6 +81,7 @@ export function SettingsTabs(props: Props) {
         <ConnectStoreTab onGoToCredentials={() => setTab("credentials")} />
       ) : null}
       {tab === "credentials" ? <CredentialsTab /> : null}
+      {tab === "sync" ? <SyncTab /> : null}
       {tab === "users" ? <UsersTab /> : null}
     </div>
   );

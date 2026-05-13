@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import { AutoSyncToggle } from "@/components/auto-sync-toggle";
 import { StoreSwitcher } from "@/components/store-switcher";
@@ -14,36 +14,116 @@ type Props = {
   stores: StoreSummary[];
 };
 
+type SyncJob = {
+  id: string;
+  storeId: string;
+  status: "queued" | "running" | "success" | "failed";
+  phase: string;
+  currentCount: number;
+  totalCount: number | null;
+  message: string | null;
+  startedAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+};
+
+function progressLabel(job: SyncJob): string {
+  if (job.status === "queued") return "Queued…";
+  if (job.status === "failed") return job.message ?? "Sync failed";
+  if (job.status === "success") return job.message ?? "Sync complete";
+  // running
+  const total = job.totalCount;
+  if (job.phase === "fetching") {
+    return total ? `Fetching ${job.currentCount}/${total}` : `Fetching ${job.currentCount} products…`;
+  }
+  if (job.phase === "metafields") {
+    return total ? `Metafields ${job.currentCount}/${total}` : `Fetching metafields…`;
+  }
+  if (job.phase === "cleanup") return "Cleaning up…";
+  return job.message ?? "Syncing…";
+}
+
 export function Topbar({ store, stores }: Props) {
   const router = useRouter();
-  const [syncMessage, setSyncMessage] = useState<string>("");
+  const [job, setJob] = useState<SyncJob | null>(null);
   const [isPending, startTransition] = useTransition();
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTerminalIdRef = useRef<string | null>(null);
+
+  const isRunning = job?.status === "queued" || job?.status === "running";
+
+  useEffect(() => {
+    if (!store) return;
+    let cancelled = false;
+
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/stores/${store.id}/sync/status`, { cache: "no-store" });
+        if (!res.ok) return;
+        const payload = (await res.json()) as { job: SyncJob | null };
+        if (cancelled) return;
+        const next = payload.job;
+        setJob(next);
+        if (next && (next.status === "success" || next.status === "failed")) {
+          // Refresh the page once when a job transitions to a terminal state so
+          // newly synced products show up without a manual reload.
+          if (lastTerminalIdRef.current !== next.id) {
+            lastTerminalIdRef.current = next.id;
+            startTransition(() => router.refresh());
+          }
+        }
+      } catch {
+        // ignore transient errors
+      }
+    };
+
+    tick();
+    const interval = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      if (pollRef.current) clearTimeout(pollRef.current);
+    };
+  }, [store, router]);
+
+  async function handleCancel() {
+    if (!store) return;
+    try {
+      await fetch(`/api/stores/${store.id}/sync/cancel`, { method: "POST" });
+      setJob((prev) => (prev ? { ...prev, status: "failed", message: "Cancelled" } : prev));
+    } catch {
+      // ignore — next status poll will surface the real state
+    }
+  }
 
   async function handleSyncNow() {
     if (!store) return;
-    setSyncMessage("Sync started...");
+    if (isRunning) return;
+    setJob((prev) => (prev ? { ...prev, status: "queued", message: "Queued…" } : prev));
     try {
       const response = await fetch(`/api/stores/${store.id}/sync`, { method: "POST" });
-      const payload = (await response.json()) as {
-        success?: boolean;
-        syncedProducts?: number;
-        syncedVariants?: number;
-        error?: string;
-      };
-
+      const payload = (await response.json()) as { success?: boolean; job?: SyncJob; error?: string };
       if (!response.ok || !payload.success) {
-        setSyncMessage(payload.error ?? "Sync failed. Check credentials and try again.");
+        setJob(
+          (prev) =>
+            ({
+              ...(prev ?? ({} as SyncJob)),
+              status: "failed",
+              message: payload.error ?? "Sync failed"
+            }) as SyncJob
+        );
         return;
       }
-
-      setSyncMessage(
-        `Synced ${payload.syncedProducts ?? 0} products and ${payload.syncedVariants ?? 0} variants.`
-      );
-      startTransition(() => {
-        router.refresh();
-      });
+      if (payload.job) setJob(payload.job);
     } catch {
-      setSyncMessage("Sync failed. Unable to reach the server.");
+      setJob(
+        (prev) =>
+          ({
+            ...(prev ?? ({} as SyncJob)),
+            status: "failed",
+            message: "Unable to reach the server"
+          }) as SyncJob
+      );
     }
   }
 
@@ -99,7 +179,37 @@ export function Topbar({ store, stores }: Props) {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        {syncMessage ? <p className="text-xs text-muted">{syncMessage}</p> : null}
+        {job && (job.status !== "success" || isPending) ? (
+          <span
+            className={cn(
+              "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium",
+              job.status === "failed"
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : isRunning
+                  ? "border-sky-200 bg-sky-50 text-sky-700"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-700"
+            )}
+          >
+            {isRunning ? (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3 animate-spin">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+            ) : null}
+            {progressLabel(job)}
+            {isRunning ? (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="ml-1 rounded-full bg-white/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-sky-700 transition hover:bg-white"
+                title="Cancel sync"
+              >
+                Cancel
+              </button>
+            ) : null}
+          </span>
+        ) : null}
         <AutoSyncToggle store={store} />
         <a
           href="/imports"
@@ -109,15 +219,15 @@ export function Topbar({ store, stores }: Props) {
         </a>
         <button
           onClick={handleSyncNow}
-          disabled={isPending}
+          disabled={isRunning}
           className="inline-flex items-center gap-2 rounded-xl bg-ink px-4 py-2.5 text-sm font-semibold text-white shadow-panel transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={cn("h-4 w-4", isPending && "animate-spin")}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={cn("h-4 w-4", isRunning && "animate-spin")}>
             <polyline points="23 4 23 10 17 10" />
             <polyline points="1 20 1 14 7 14" />
             <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
           </svg>
-          {isPending ? "Syncing..." : "Sync now"}
+          {isRunning ? "Syncing…" : "Sync now"}
         </button>
       </div>
     </header>

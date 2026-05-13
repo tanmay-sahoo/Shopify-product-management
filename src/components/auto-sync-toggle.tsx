@@ -1,13 +1,12 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { StoreSummary } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STORAGE_KEY = "lns_auto_sync";
-const SMART_SYNC_STALE_MIN = 10;
 
 type Settings = {
   enabled: boolean;
@@ -86,41 +85,11 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
     };
   }, [settings.enabled, settings.intervalMin, runSync]);
 
-  const lastSyncMs = useMemo(() => {
-    if (!store?.lastSyncAt) return null;
-    const ms = new Date(store.lastSyncAt).getTime();
-    return Number.isFinite(ms) && ms > 0 ? ms : null;
-  }, [store?.lastSyncAt]);
-
-  const isStale = useMemo(() => {
-    if (!lastSyncMs) return true;
-    return Date.now() - lastSyncMs > SMART_SYNC_STALE_MIN * 60 * 1000;
-  }, [lastSyncMs]);
-
-  useEffect(() => {
-    if (!store?.id) return;
-    if (isStale && !running) {
-      void runSync("smart");
-    }
-  }, [store?.id, isStale, running, runSync]);
-
-  useEffect(() => {
-    function onVisibility() {
-      if (document.visibilityState !== "visible") return;
-      if (!store?.id) return;
-      if (Date.now() - lastRunRef.current < 30_000) return;
-      const last = lastSyncMs ?? 0;
-      if (Date.now() - last > SMART_SYNC_STALE_MIN * 60 * 1000) {
-        void runSync("smart");
-      }
-    }
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("focus", onVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("focus", onVisibility);
-    };
-  }, [lastSyncMs, runSync, store?.id]);
+  // Smart-sync (auto-trigger on tab focus / stale data) is intentionally
+  // disabled. It caused tight re-sync loops when combined with the new
+  // background-sync route. Use the manual "Sync now" button or enable the
+  // periodic toggle below for fixed-interval polling. Webhooks cover the
+  // real-time update path.
 
   useEffect(() => {
     if (!open) return;
@@ -158,8 +127,8 @@ export function AutoSyncToggle({ store }: { store: StoreSummary }) {
         <div className="absolute right-0 z-40 mt-2 w-80 rounded-2xl border border-line bg-white p-4 shadow-panel">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">Auto-sync</p>
           <p className="mt-1 text-xs leading-5 text-muted">
-            Background sync runs when the data is older than {SMART_SYNC_STALE_MIN} min and you focus this tab. Enable
-            the periodic toggle for fixed-interval polling on top of that.
+            Use the periodic toggle below for fixed-interval polling. Real-time updates from Shopify
+            come through webhooks; smart-sync on tab focus is disabled.
           </p>
 
           <label className="mt-4 flex items-center justify-between">

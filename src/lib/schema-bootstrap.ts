@@ -15,6 +15,17 @@ async function columnExists(table: string, column: string) {
   return Number(rows[0]?.count ?? 0) > 0;
 }
 
+async function indexExists(table: string, indexName: string) {
+  const rows = await getPrismaClient().$queryRaw<{ count: bigint }[]>(
+    Prisma.sql`SELECT COUNT(*) AS count
+               FROM INFORMATION_SCHEMA.STATISTICS
+               WHERE TABLE_SCHEMA = DATABASE()
+                 AND TABLE_NAME = ${table}
+                 AND INDEX_NAME = ${indexName}`
+  );
+  return Number(rows[0]?.count ?? 0) > 0;
+}
+
 async function bootstrap() {
   const prisma = getPrismaClient();
 
@@ -30,6 +41,45 @@ async function bootstrap() {
       "ALTER TABLE `Store` ADD COLUMN `currencyCode` VARCHAR(3) NULL"
     );
     console.info("[schema-bootstrap] added Store.currencyCode column");
+  }
+
+  // Import-job progress columns. Plain VARCHAR/INT to keep migrations cheap.
+  if (!(await columnExists("Import", "phase"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `Import` ADD COLUMN `phase` VARCHAR(50) NOT NULL DEFAULT 'pending'"
+    );
+  }
+  if (!(await columnExists("Import", "currentCount"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `Import` ADD COLUMN `currentCount` INT NOT NULL DEFAULT 0"
+    );
+  }
+  if (!(await columnExists("Import", "message"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `Import` ADD COLUMN `message` TEXT NULL"
+    );
+  }
+  if (!(await columnExists("Import", "finishedAt"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `Import` ADD COLUMN `finishedAt` DATETIME(3) NULL"
+    );
+  }
+
+  // Per-row push outcome columns.
+  if (!(await columnExists("ImportRow", "pushStatus"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `ImportRow` ADD COLUMN `pushStatus` VARCHAR(20) NOT NULL DEFAULT 'pending'"
+    );
+  }
+  if (!(await columnExists("ImportRow", "pushError"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `ImportRow` ADD COLUMN `pushError` TEXT NULL"
+    );
+  }
+  if (!(await columnExists("ImportRow", "title"))) {
+    await prisma.$executeRawUnsafe(
+      "ALTER TABLE `ImportRow` ADD COLUMN `title` VARCHAR(500) NULL"
+    );
   }
 
   await prisma.$executeRawUnsafe(`
@@ -103,6 +153,45 @@ async function bootstrap() {
   `);
 
   await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`AppSetting\` (
+      \`settingKey\` VARCHAR(100) NOT NULL,
+      \`value\` TEXT NULL,
+      \`updatedAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      PRIMARY KEY (\`settingKey\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`SyncJob\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`status\` ENUM('queued','running','success','failed') NOT NULL DEFAULT 'queued',
+      \`phase\` VARCHAR(50) NOT NULL DEFAULT 'pending',
+      \`currentCount\` INT NOT NULL DEFAULT 0,
+      \`totalCount\` INT NULL,
+      \`message\` TEXT NULL,
+      \`startedAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`finishedAt\` DATETIME(3) NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`SyncJob_storeId_idx\` (\`storeId\`),
+      INDEX \`SyncJob_storeId_startedAt_idx\` (\`storeId\`, \`startedAt\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  if (!(await indexExists("Variant", "Variant_storeId_shopifyVariantId_unique"))) {
+    try {
+      await prisma.$executeRawUnsafe(
+        "ALTER TABLE `Variant` ADD UNIQUE INDEX `Variant_storeId_shopifyVariantId_unique` (`storeId`, `shopifyVariantId`)"
+      );
+      console.info("[schema-bootstrap] added Variant (storeId, shopifyVariantId) unique index");
+    } catch (error) {
+      // index may already exist under a different name; non-fatal
+      console.warn("[schema-bootstrap] could not add Variant unique index:", error);
+    }
+  }
+
+  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS \`InventorySyncGroupItem\` (
       \`id\` BIGINT NOT NULL AUTO_INCREMENT,
       \`groupId\` BIGINT NOT NULL,
@@ -135,11 +224,25 @@ async function bootstrap() {
 
 export function ensureSchemaCompatibility(): Promise<void> {
   if (!bootstrapPromise) {
-    bootstrapPromise = bootstrap().catch((error) => {
-      console.error("[schema-bootstrap] failed:", error);
-      bootstrapPromise = null;
-      throw error;
-    });
+    bootstrapPromise = bootstrap()
+      .then(async () => {
+        // Lazy-start the smart-sync scheduler the first time any API hits the
+        // DB. We can't do this from src/instrumentation.ts because that file
+        // is bundled for both Node and Edge runtimes — pulling in Prisma there
+        // breaks the Edge build (no wasm engine). Doing it here keeps the
+        // import chain Node-only.
+        try {
+          const mod = await import("@/lib/sync-scheduler");
+          mod.ensureSmartSyncScheduler();
+        } catch (error) {
+          console.warn("[schema-bootstrap] failed to start smart-sync scheduler", error);
+        }
+      })
+      .catch((error) => {
+        console.error("[schema-bootstrap] failed:", error);
+        bootstrapPromise = null;
+        throw error;
+      });
   }
   return bootstrapPromise;
 }

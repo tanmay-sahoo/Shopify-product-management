@@ -125,8 +125,8 @@ export default async function DashboardPage() {
         />
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.4fr_0.6fr]">
-        <div className="space-y-4">
+      <section className="grid gap-6 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,0.6fr)]">
+        <div className="min-w-0 space-y-4">
           <SectionHeader
             title="Products"
             description="Search, filter, expand variants, and stage bulk actions."
@@ -134,30 +134,36 @@ export default async function DashboardPage() {
           <ProductTable products={products} store={store} />
         </div>
 
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           <SectionHeader title="Recent Activity" description="Latest sync and import operations." />
-          <div className="space-y-3">
-            {syncLogs.map((log) => (
-              <article
-                key={log.id}
-                className="rounded-2xl border border-line/70 bg-white p-4 shadow-sm transition hover:shadow-panel"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">
-                    {log.jobType}
-                  </p>
-                  <span
-                    className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${
-                      statusTone[log.status] ?? statusTone.started
-                    }`}
-                  >
-                    {log.status}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm leading-6 text-ink/80">{log.message}</p>
-                <p className="mt-2 text-[11px] text-muted">{formatDate(log.createdAt)}</p>
-              </article>
-            ))}
+          <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
+            {syncLogs.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-line/70 bg-white p-4 text-sm text-muted">
+                No sync or import activity yet.
+              </p>
+            ) : (
+              syncLogs.map((log) => (
+                <article
+                  key={log.id}
+                  className="rounded-2xl border border-line/70 bg-white p-4 shadow-sm transition hover:shadow-panel"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="truncate text-xs font-semibold uppercase tracking-[0.16em] text-muted">
+                      {log.jobType}
+                    </p>
+                    <span
+                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${
+                        statusTone[log.status] ?? statusTone.started
+                      }`}
+                    >
+                      {log.status}
+                    </span>
+                  </div>
+                  <p className="mt-2 break-words text-sm leading-6 text-ink/80">{log.message}</p>
+                  <p className="mt-2 text-[11px] text-muted">{formatDate(log.createdAt)}</p>
+                </article>
+              ))
+            )}
           </div>
         </div>
       </section>

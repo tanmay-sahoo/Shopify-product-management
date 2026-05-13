@@ -121,6 +121,67 @@ const PRODUCT_VARIANTS_MEDIA_QUERY = `
   }
 `;
 
+// Snapshot of an existing product used by the partial-update path. We pull
+// only the fields we might want to update so a re-import that doesn't change
+// anything makes zero mutations.
+const PRODUCT_SNAPSHOT_QUERY = `
+  query ProductSnapshot($id: ID!) {
+    product(id: $id) {
+      id
+      title
+      descriptionHtml
+      vendor
+      productType
+      tags
+      status
+      seo { title description }
+      options { id name position values }
+      variants(first: 250) {
+        edges {
+          node {
+            id
+            sku
+            barcode
+            price
+            compareAtPrice
+            inventoryQuantity
+            inventoryPolicy
+            taxable
+            selectedOptions { name value }
+            inventoryItem {
+              id
+              tracked
+              requiresShipping
+              measurement { weight { unit value } }
+              unitCost { amount }
+              countryCodeOfOrigin
+              harmonizedSystemCode
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const PRODUCT_VARIANTS_BULK_UPDATE = `
+  mutation ProductVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id sku inventoryItem { id } }
+      userErrors { field message }
+    }
+  }
+`;
+
+const PRODUCT_VARIANTS_BULK_CREATE = `
+  mutation ProductVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkCreate(productId: $productId, variants: $variants) {
+      productVariants { id sku inventoryItem { id } }
+      userErrors { field message }
+    }
+  }
+`;
+
 // Shopify CDN URLs preserve the original filename, so we match existing media
 // by filename (last path segment) to avoid re-uploading the same image on
 // subsequent pushes of the same product.
@@ -423,6 +484,150 @@ function userErrorMessage(errors: Array<{ field: string[] | null; message: strin
   return errors.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`).join("; ");
 }
 
+// Snapshot we read once per existing product for partial-update diffing.
+type ProductSnapshot = {
+  title: string | null;
+  descriptionHtml: string | null;
+  vendor: string | null;
+  productType: string | null;
+  tags: string[];
+  status: string | null;
+  seo: { title: string | null; description: string | null } | null;
+  variants: Array<{
+    id: string;
+    sku: string | null;
+    barcode: string | null;
+    price: string | null;
+    compareAtPrice: string | null;
+    inventoryQuantity: number | null;
+    inventoryPolicy: string | null;
+    taxable: boolean | null;
+    inventoryItem: {
+      id: string | null;
+      tracked: boolean | null;
+      requiresShipping: boolean | null;
+      countryCodeOfOrigin: string | null;
+      harmonizedSystemCode: string | null;
+      weightGrams: number | null;
+      unitCostAmount: string | null;
+    } | null;
+  }>;
+};
+
+async function fetchProductSnapshot(auth: ShopAuth, productId: string): Promise<ProductSnapshot | null> {
+  type Resp = {
+    data?: {
+      product?: {
+        title: string | null;
+        descriptionHtml: string | null;
+        vendor: string | null;
+        productType: string | null;
+        tags: string[] | null;
+        status: string | null;
+        seo: { title: string | null; description: string | null } | null;
+        variants: {
+          edges: Array<{
+            node: {
+              id: string;
+              sku: string | null;
+              barcode: string | null;
+              price: string | null;
+              compareAtPrice: string | null;
+              inventoryQuantity: number | null;
+              inventoryPolicy: string | null;
+              taxable: boolean | null;
+              inventoryItem: {
+                id: string | null;
+                tracked: boolean | null;
+                requiresShipping: boolean | null;
+                countryCodeOfOrigin: string | null;
+                harmonizedSystemCode: string | null;
+                measurement: { weight: { unit: string | null; value: number | null } | null } | null;
+                unitCost: { amount: string | null } | null;
+              } | null;
+            };
+          }>;
+        };
+      } | null;
+    };
+    errors?: Array<{ message: string }>;
+  };
+  try {
+    const resp = await shopifyGraphQLRequest<Resp>({
+      shopDomain: auth.shopDomain,
+      accessToken: auth.accessToken,
+      query: PRODUCT_SNAPSHOT_QUERY,
+      variables: { id: productId }
+    });
+    const p = resp.data?.product;
+    if (!p) return null;
+    return {
+      title: p.title,
+      descriptionHtml: p.descriptionHtml,
+      vendor: p.vendor,
+      productType: p.productType,
+      tags: p.tags ?? [],
+      status: p.status,
+      seo: p.seo,
+      variants: p.variants.edges.map((edge) => {
+        const node = edge.node;
+        const weight = node.inventoryItem?.measurement?.weight;
+        const grams = (() => {
+          if (!weight || weight.value === null || weight.value === undefined) return null;
+          const v = Number(weight.value);
+          if (!Number.isFinite(v)) return null;
+          const unit = (weight.unit ?? "GRAMS").toUpperCase();
+          if (unit === "KILOGRAMS") return Math.round(v * 1000);
+          if (unit === "POUNDS") return Math.round(v * 453.59237);
+          if (unit === "OUNCES") return Math.round(v * 28.349523125);
+          return Math.round(v);
+        })();
+        return {
+          id: node.id,
+          sku: node.sku,
+          barcode: node.barcode,
+          price: node.price,
+          compareAtPrice: node.compareAtPrice,
+          inventoryQuantity: node.inventoryQuantity,
+          inventoryPolicy: node.inventoryPolicy,
+          taxable: node.taxable,
+          inventoryItem: node.inventoryItem
+            ? {
+                id: node.inventoryItem.id,
+                tracked: node.inventoryItem.tracked,
+                requiresShipping: node.inventoryItem.requiresShipping,
+                countryCodeOfOrigin: node.inventoryItem.countryCodeOfOrigin,
+                harmonizedSystemCode: node.inventoryItem.harmonizedSystemCode,
+                weightGrams: grams,
+                unitCostAmount: node.inventoryItem.unitCost?.amount ?? null
+              }
+            : null
+        };
+      })
+    };
+  } catch {
+    return null;
+  }
+}
+
+function arraysEqualIgnoringOrder(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const setA = new Set(a.map((s) => s.trim()).filter(Boolean));
+  const setB = new Set(b.map((s) => s.trim()).filter(Boolean));
+  if (setA.size !== setB.size) return false;
+  for (const v of setA) if (!setB.has(v)) return false;
+  return true;
+}
+
+function decimalEquals(a: unknown, b: unknown): boolean {
+  if (a === undefined || a === null || a === "") return b === undefined || b === null || b === "";
+  if (b === undefined || b === null || b === "") return false;
+  const na = Number(a);
+  const nb = Number(b);
+  if (!Number.isFinite(na) || !Number.isFinite(nb)) return String(a) === String(b);
+  return Math.abs(na - nb) < 1e-6;
+}
+
 async function pushOneProduct(
   auth: ShopAuth,
   product: ParsedProduct,
@@ -431,8 +636,20 @@ async function pushOneProduct(
 ): Promise<PushOutcome> {
   // 1. Resolve product ID (find or create stub).
   let productId = await findProductIdByHandle(auth, product.handle);
+  // Track whether this product existed in Shopify before this push. We use
+  // this further down to skip the image-upload phase entirely for already-
+  // existing products — otherwise re-imports of the same CSV (with different
+  // source URLs) would accumulate duplicate media.
+  const productExistedBefore = Boolean(productId);
+
+  // Container for the variant list we'll attach media / inventory / metafields
+  // to later. Populated by either the new-product path (from productSet) or
+  // the existing-product path (from the snapshot + bulkCreate response).
+  type CreatedVariant = { node: { id: string; sku: string | null; inventoryItem: { id: string } | null } };
+  let createdVariants: CreatedVariant[] = [];
 
   if (!productId) {
+    // ---- NEW PRODUCT PATH: productCreate stub, then productSet wholesale ----
     type Resp = {
       data?: { productCreate?: { product?: { id: string } | null; userErrors?: Array<{ field: string[] | null; message: string }> } };
       errors?: Array<{ message: string }>;
@@ -456,94 +673,291 @@ async function pushOneProduct(
     }
     productId = resp.data?.productCreate?.product?.id ?? null;
     if (!productId) return { handle: product.handle, ok: false, message: "productCreate returned no id" };
-  } else {
-    // Sync title/status/etc. via productUpdate. Skip metafields here — handled by metafieldsSet below.
-    type Resp = {
-      data?: { productUpdate?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
-      errors?: Array<{ message: string }>;
-    };
-    const input: Record<string, unknown> = {
+
+    const productOptions = buildProductOptions(product);
+    const optionNames = [product.option1Name, product.option2Name, product.option3Name].filter(Boolean);
+    const productSetInput: Record<string, unknown> = {
       id: productId,
+      handle: product.handle,
       title: product.title || product.handle,
-      descriptionHtml: product.bodyHtml || undefined,
-      vendor: product.vendor || undefined,
-      productType: product.productType || undefined,
-      status: statusEnum(product.status),
+      descriptionHtml: product.bodyHtml,
+      vendor: product.vendor,
+      productType: product.productType,
       tags: product.tags,
-      seo: { title: product.seoTitle || undefined, description: product.seoDescription || undefined }
+      status: statusEnum(product.status),
+      seo: { title: product.seoTitle, description: product.seoDescription },
+      productOptions: productOptions.length ? productOptions : undefined,
+      variants: dedupeVariantsByOptions(product.variants).map((variant) => {
+        const optionValues =
+          productOptions.length === 0
+            ? []
+            : variantOptionValues(variant, productOptions.length ? productOptions.map((o) => o.name) : optionNames);
+        const grams = weightInGrams(variant);
+        return {
+          sku: variant.sku || undefined,
+          barcode: variant.barcode || undefined,
+          price: variant.price || undefined,
+          compareAtPrice: variant.compareAtPrice || undefined,
+          taxable: variant.taxable ? /^(true|yes|1)$/i.test(variant.taxable) : undefined,
+          inventoryPolicy: (variant.inventoryPolicy || "deny").toUpperCase(),
+          inventoryItem: {
+            tracked: variant.inventoryTracker.toLowerCase() === "shopify" ? true : undefined,
+            requiresShipping: variant.requiresShipping ? /^(true|yes|1)$/i.test(variant.requiresShipping) : undefined,
+            cost: variant.costPerItem || undefined,
+            countryCodeOfOrigin: variant.countryOfOrigin || undefined,
+            harmonizedSystemCode: variant.harmonizedSystemCode || undefined,
+            measurement: grams !== null ? { weight: { unit: "GRAMS", value: grams } } : undefined
+          },
+          optionValues: optionValues.length ? optionValues : undefined
+        };
+      })
     };
-    const resp = await shopifyGraphQLRequest<Resp>({
+
+    const setResp = await shopifyGraphQLRequest<ProductSetResp>({
       shopDomain: auth.shopDomain,
       accessToken: auth.accessToken,
-      query: PRODUCT_UPDATE,
-      variables: { product: input }
+      query: PRODUCT_SET,
+      variables: { input: productSetInput }
     });
-    const errs = userErrorMessage(resp.data?.productUpdate?.userErrors);
-    if (errs) return { handle: product.handle, ok: false, message: `productUpdate: ${errs}` };
-  }
-
-  // 2. Replace product structure + variants via productSet.
-  const productOptions = buildProductOptions(product);
-  const optionNames = [product.option1Name, product.option2Name, product.option3Name].filter(Boolean);
-
-  const productSetInput: Record<string, unknown> = {
-    id: productId,
-    handle: product.handle,
-    title: product.title || product.handle,
-    descriptionHtml: product.bodyHtml,
-    vendor: product.vendor,
-    productType: product.productType,
-    tags: product.tags,
-    status: statusEnum(product.status),
-    seo: { title: product.seoTitle, description: product.seoDescription },
-    productOptions: productOptions.length ? productOptions : undefined,
-    variants: dedupeVariantsByOptions(product.variants).map((variant) => {
-      const optionValues =
-        productOptions.length === 0
-          ? []
-          : variantOptionValues(variant, productOptions.length ? productOptions.map((o) => o.name) : optionNames);
-      const grams = weightInGrams(variant);
+    const setErrs = userErrorMessage(setResp.data?.productSet?.userErrors);
+    if (setErrs) return { handle: product.handle, ok: false, message: `productSet: ${setErrs}`, productId };
+    if (setResp.errors?.length) {
       return {
-        sku: variant.sku || undefined,
-        barcode: variant.barcode || undefined,
-        price: variant.price || undefined,
-        compareAtPrice: variant.compareAtPrice || undefined,
-        taxable: variant.taxable ? /^(true|yes|1)$/i.test(variant.taxable) : undefined,
-        inventoryPolicy: (variant.inventoryPolicy || "deny").toUpperCase(),
-        inventoryItem: {
-          tracked: variant.inventoryTracker.toLowerCase() === "shopify" ? true : undefined,
-          requiresShipping: variant.requiresShipping ? /^(true|yes|1)$/i.test(variant.requiresShipping) : undefined,
-          cost: variant.costPerItem || undefined,
-          countryCodeOfOrigin: variant.countryOfOrigin || undefined,
-          harmonizedSystemCode: variant.harmonizedSystemCode || undefined,
-          measurement:
-            grams !== null
-              ? { weight: { unit: "GRAMS", value: grams } }
-              : undefined
-        },
-        optionValues: optionValues.length ? optionValues : undefined
+        handle: product.handle,
+        ok: false,
+        message: `productSet: ${setResp.errors.map((e) => e.message).join("; ")}`,
+        productId
       };
-    })
-  };
+    }
+    createdVariants = setResp.data?.productSet?.product?.variants.edges ?? [];
+  } else {
+    // ---- EXISTING PRODUCT PATH: Shopify-style partial update ----
+    // Pull current snapshot; if we can't read it, fall back to a conservative
+    // productUpdate without variant changes (we don't want to wipe variants).
+    const snapshot = await fetchProductSnapshot(auth, productId);
 
-  const setResp = await shopifyGraphQLRequest<ProductSetResp>({
-    shopDomain: auth.shopDomain,
-    accessToken: auth.accessToken,
-    query: PRODUCT_SET,
-    variables: { input: productSetInput }
-  });
-  const setErrs = userErrorMessage(setResp.data?.productSet?.userErrors);
-  if (setErrs) return { handle: product.handle, ok: false, message: `productSet: ${setErrs}`, productId };
-  if (setResp.errors?.length) {
-    return {
-      handle: product.handle,
-      ok: false,
-      message: `productSet: ${setResp.errors.map((e) => e.message).join("; ")}`,
-      productId
-    };
+    // Diff the product-level fields. Only push ones that actually changed.
+    const productPatch: Record<string, unknown> = { id: productId };
+    let productPatched = false;
+    const incomingTitle = product.title || product.handle;
+    if (snapshot && snapshot.title !== incomingTitle) {
+      productPatch.title = incomingTitle;
+      productPatched = true;
+    }
+    if (snapshot && product.bodyHtml && (snapshot.descriptionHtml ?? "") !== product.bodyHtml) {
+      productPatch.descriptionHtml = product.bodyHtml;
+      productPatched = true;
+    }
+    if (snapshot && product.vendor && (snapshot.vendor ?? "") !== product.vendor) {
+      productPatch.vendor = product.vendor;
+      productPatched = true;
+    }
+    if (snapshot && product.productType && (snapshot.productType ?? "") !== product.productType) {
+      productPatch.productType = product.productType;
+      productPatched = true;
+    }
+    if (snapshot && !arraysEqualIgnoringOrder(snapshot.tags, product.tags)) {
+      productPatch.tags = product.tags;
+      productPatched = true;
+    }
+    const incomingStatus = statusEnum(product.status);
+    if (snapshot && (snapshot.status ?? "").toUpperCase() !== incomingStatus) {
+      productPatch.status = incomingStatus;
+      productPatched = true;
+    }
+    if (snapshot) {
+      const incomingSeoTitle = product.seoTitle || "";
+      const incomingSeoDesc = product.seoDescription || "";
+      const currentSeoTitle = snapshot.seo?.title ?? "";
+      const currentSeoDesc = snapshot.seo?.description ?? "";
+      if (currentSeoTitle !== incomingSeoTitle || currentSeoDesc !== incomingSeoDesc) {
+        productPatch.seo = { title: incomingSeoTitle, description: incomingSeoDesc };
+        productPatched = true;
+      }
+    }
+
+    if (productPatched) {
+      type UpdResp = {
+        data?: { productUpdate?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
+        errors?: Array<{ message: string }>;
+      };
+      const resp = await shopifyGraphQLRequest<UpdResp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: PRODUCT_UPDATE,
+        variables: { product: productPatch }
+      });
+      const errs = userErrorMessage(resp.data?.productUpdate?.userErrors);
+      if (errs) return { handle: product.handle, ok: false, message: `productUpdate: ${errs}` };
+      if (resp.errors?.length) {
+        return { handle: product.handle, ok: false, message: `productUpdate: ${resp.errors.map((e) => e.message).join("; ")}` };
+      }
+    }
+
+    // Variant diff. Match incoming variants to existing by SKU. For matched
+    // ones, only patch fields that actually changed. Variants that exist in
+    // Shopify but not in the CSV are LEFT ALONE — Shopify's bulk import has
+    // the same additive behaviour.
+    const incomingVariants = dedupeVariantsByOptions(product.variants);
+    const existingBySku = new Map<string, ProductSnapshot["variants"][number]>();
+    for (const v of snapshot?.variants ?? []) {
+      if (v.sku) existingBySku.set(v.sku.trim(), v);
+    }
+
+    const variantPatches: Array<Record<string, unknown>> = [];
+    const variantsToCreate: ParsedVariant[] = [];
+    for (const incoming of incomingVariants) {
+      const sku = (incoming.sku ?? "").trim();
+      const existing = sku ? existingBySku.get(sku) : undefined;
+      if (!existing) {
+        variantsToCreate.push(incoming);
+        continue;
+      }
+      const patch: Record<string, unknown> = { id: existing.id };
+      let changed = false;
+      if (incoming.price && !decimalEquals(existing.price, incoming.price)) {
+        patch.price = incoming.price;
+        changed = true;
+      }
+      if (incoming.compareAtPrice && !decimalEquals(existing.compareAtPrice, incoming.compareAtPrice)) {
+        patch.compareAtPrice = incoming.compareAtPrice;
+        changed = true;
+      }
+      if (incoming.barcode && existing.barcode !== incoming.barcode) {
+        patch.barcode = incoming.barcode;
+        changed = true;
+      }
+      if (incoming.taxable) {
+        const incomingTaxable = /^(true|yes|1)$/i.test(incoming.taxable);
+        if (existing.taxable !== incomingTaxable) {
+          patch.taxable = incomingTaxable;
+          changed = true;
+        }
+      }
+      if (incoming.inventoryPolicy) {
+        const incomingPolicy = incoming.inventoryPolicy.toUpperCase();
+        if ((existing.inventoryPolicy ?? "").toUpperCase() !== incomingPolicy) {
+          patch.inventoryPolicy = incomingPolicy;
+          changed = true;
+        }
+      }
+      const inventoryItemPatch: Record<string, unknown> = {};
+      const grams = weightInGrams(incoming);
+      if (grams !== null && existing.inventoryItem?.weightGrams !== grams) {
+        inventoryItemPatch.measurement = { weight: { unit: "GRAMS", value: grams } };
+      }
+      if (incoming.costPerItem && !decimalEquals(existing.inventoryItem?.unitCostAmount ?? null, incoming.costPerItem)) {
+        inventoryItemPatch.cost = incoming.costPerItem;
+      }
+      if (
+        incoming.countryOfOrigin &&
+        existing.inventoryItem?.countryCodeOfOrigin !== incoming.countryOfOrigin
+      ) {
+        inventoryItemPatch.countryCodeOfOrigin = incoming.countryOfOrigin;
+      }
+      if (
+        incoming.harmonizedSystemCode &&
+        existing.inventoryItem?.harmonizedSystemCode !== incoming.harmonizedSystemCode
+      ) {
+        inventoryItemPatch.harmonizedSystemCode = incoming.harmonizedSystemCode;
+      }
+      if (incoming.requiresShipping) {
+        const incomingShip = /^(true|yes|1)$/i.test(incoming.requiresShipping);
+        if (existing.inventoryItem?.requiresShipping !== incomingShip) {
+          inventoryItemPatch.requiresShipping = incomingShip;
+        }
+      }
+      if (incoming.inventoryTracker) {
+        const incomingTracked = incoming.inventoryTracker.toLowerCase() === "shopify";
+        if (existing.inventoryItem?.tracked !== incomingTracked) {
+          inventoryItemPatch.tracked = incomingTracked;
+        }
+      }
+      if (Object.keys(inventoryItemPatch).length > 0) {
+        patch.inventoryItem = inventoryItemPatch;
+        changed = true;
+      }
+      if (changed) variantPatches.push(patch);
+    }
+
+    if (variantPatches.length > 0) {
+      type Resp = {
+        data?: {
+          productVariantsBulkUpdate?: {
+            productVariants?: Array<{ id: string; sku: string | null; inventoryItem: { id: string } | null }>;
+            userErrors?: Array<{ field: string[] | null; message: string }>;
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      // bulkUpdate can take many variants per call.
+      const resp = await shopifyGraphQLRequest<Resp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: PRODUCT_VARIANTS_BULK_UPDATE,
+        variables: { productId, variants: variantPatches }
+      });
+      const errs = userErrorMessage(resp.data?.productVariantsBulkUpdate?.userErrors);
+      if (errs) {
+        return { handle: product.handle, ok: false, message: `productVariantsBulkUpdate: ${errs}`, productId };
+      }
+    }
+
+    if (variantsToCreate.length > 0) {
+      const optionNames = [product.option1Name, product.option2Name, product.option3Name].filter(Boolean);
+      const createInputs = variantsToCreate.map((variant) => {
+        const grams = weightInGrams(variant);
+        const optionValues = variantOptionValues(variant, optionNames);
+        return {
+          sku: variant.sku || undefined,
+          barcode: variant.barcode || undefined,
+          price: variant.price || undefined,
+          compareAtPrice: variant.compareAtPrice || undefined,
+          taxable: variant.taxable ? /^(true|yes|1)$/i.test(variant.taxable) : undefined,
+          inventoryPolicy: (variant.inventoryPolicy || "deny").toUpperCase(),
+          inventoryItem: {
+            tracked: variant.inventoryTracker.toLowerCase() === "shopify" ? true : undefined,
+            requiresShipping: variant.requiresShipping ? /^(true|yes|1)$/i.test(variant.requiresShipping) : undefined,
+            cost: variant.costPerItem || undefined,
+            countryCodeOfOrigin: variant.countryOfOrigin || undefined,
+            harmonizedSystemCode: variant.harmonizedSystemCode || undefined,
+            measurement: grams !== null ? { weight: { unit: "GRAMS", value: grams } } : undefined
+          },
+          optionValues: optionValues.length ? optionValues : undefined
+        };
+      });
+      type Resp = {
+        data?: {
+          productVariantsBulkCreate?: {
+            productVariants?: Array<{ id: string; sku: string | null; inventoryItem: { id: string } | null }>;
+            userErrors?: Array<{ field: string[] | null; message: string }>;
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      const resp = await shopifyGraphQLRequest<Resp>({
+        shopDomain: auth.shopDomain,
+        accessToken: auth.accessToken,
+        query: PRODUCT_VARIANTS_BULK_CREATE,
+        variables: { productId, variants: createInputs }
+      });
+      const errs = userErrorMessage(resp.data?.productVariantsBulkCreate?.userErrors);
+      if (errs) {
+        console.warn(`[import-push] productVariantsBulkCreate for ${product.handle}: ${errs}`);
+      }
+    }
+
+    // Re-fetch the variant list so downstream phases (media attach, inventory,
+    // metafields) see the full set including any newly-created ones.
+    const refreshed = await fetchProductSnapshot(auth, productId);
+    createdVariants = (refreshed?.variants ?? []).map((v) => ({
+      node: {
+        id: v.id,
+        sku: v.sku,
+        inventoryItem: v.inventoryItem?.id ? { id: v.inventoryItem.id } : null
+      }
+    }));
   }
-
-  const createdVariants = setResp.data?.productSet?.product?.variants.edges ?? [];
 
   // 3. Images via productCreateMedia. We build a union of every URL referenced
   //    by either a product image OR a variant image, dedupe it, upload them all,
@@ -571,16 +985,38 @@ async function pushOneProduct(
   }
 
   if (orderedUrls.length > 0) {
-    // Reuse media that's already attached to this product (matched by filename)
-    // so re-pushing the same product doesn't accumulate duplicates.
+    // Always fetch what's already there so we can reuse media when attaching
+    // to variants (step 3b) — without this lookup, productVariantAppendMedia
+    // can't find the existing MediaImage GIDs.
     const existingByFilename = await fetchExistingMediaByFilename(auth, productId);
     const urlsToUpload: string[] = [];
-    for (const url of orderedUrls) {
-      const existingId = existingByFilename.get(filenameOf(url));
-      if (existingId) {
-        mediaIdBySourceUrl.set(url, existingId);
-      } else {
-        urlsToUpload.push(url);
+
+    // HARD GUARANTEE: if the product already existed in Shopify and already
+    // has any media on it, we skip uploads entirely. This is the only way to
+    // guarantee zero duplicates when the operator re-imports a CSV whose image
+    // URLs may not match the filenames Shopify stored them under. The variant-
+    // image attach step still runs against whatever media IS already on the
+    // product (matched by filename).
+    const skipImageUploads = productExistedBefore && existingByFilename.size > 0;
+
+    if (skipImageUploads) {
+      console.info(
+        `[import-push] ${product.handle}: product already has ${existingByFilename.size} media — skipping image upload phase to avoid duplicates`
+      );
+      // Map every CSV image URL to its existing media (by filename) so variant
+      // attach still works.
+      for (const url of orderedUrls) {
+        const existingId = existingByFilename.get(filenameOf(url));
+        if (existingId) mediaIdBySourceUrl.set(url, existingId);
+      }
+    } else {
+      for (const url of orderedUrls) {
+        const existingId = existingByFilename.get(filenameOf(url));
+        if (existingId) {
+          mediaIdBySourceUrl.set(url, existingId);
+        } else {
+          urlsToUpload.push(url);
+        }
       }
     }
 
@@ -785,6 +1221,16 @@ async function pushOneProduct(
 
   // 5. Inventory levels via inventorySetQuantities (per variant with a number).
   if (locationId) {
+    // For existing products we re-fetch current inventoryQuantity per variant
+    // so we can skip the write when the CSV already matches Shopify. New
+    // products always need the initial set.
+    const currentQtyBySku = new Map<string, number | null>();
+    if (productExistedBefore) {
+      const snap = await fetchProductSnapshot(auth, productId);
+      for (const v of snap?.variants ?? []) {
+        if (v.sku) currentQtyBySku.set(v.sku.trim(), v.inventoryQuantity ?? null);
+      }
+    }
     const inventories: Array<{ inventoryItemId: string; locationId: string; quantity: number }> = [];
     product.variants.forEach((parsedVariant, idx) => {
       const qty = Number(parsedVariant.inventoryQuantity);
@@ -794,6 +1240,11 @@ async function pushOneProduct(
         : variantsByIndex[idx];
       const invItem = matched?.node.inventoryItem?.id;
       if (!invItem) return;
+      // Skip the write if Shopify already has the same quantity.
+      if (productExistedBefore && parsedVariant.sku) {
+        const existing = currentQtyBySku.get(parsedVariant.sku.trim());
+        if (existing !== undefined && existing === qty) return;
+      }
       inventories.push({ inventoryItemId: invItem, locationId, quantity: qty });
     });
     if (inventories.length > 0) {
@@ -833,9 +1284,26 @@ async function pushOneProduct(
   };
 }
 
-export async function pushParsedProducts(storeId: bigint, products: ParsedProduct[]): Promise<{
+export type PushProgress = {
+  index: number; // 0-based
+  total: number;
+  ok: number;
+  failed: number;
+  outcome: PushOutcome;
+};
+
+export type PushOptions = {
+  onProgress?: (progress: PushProgress) => void | Promise<void>;
+  shouldCancel?: () => boolean | Promise<boolean>;
+};
+
+export async function pushParsedProducts(
+  storeId: bigint,
+  products: ParsedProduct[],
+  options: PushOptions = {}
+): Promise<{
   outcomes: PushOutcome[];
-  totals: { ok: number; failed: number };
+  totals: { ok: number; failed: number; cancelled?: boolean };
 }> {
   const auth = await loadShopAuth(storeId);
   if (!auth) {
@@ -847,18 +1315,33 @@ export async function pushParsedProducts(storeId: bigint, products: ParsedProduc
   const locationId = await getPrimaryLocation(auth);
   const resolver = new DestinationResolver(auth);
   const outcomes: PushOutcome[] = [];
-  for (const product of products) {
+  let ok = 0;
+  let failed = 0;
+  let cancelled = false;
+  for (let i = 0; i < products.length; i++) {
+    if (options.shouldCancel && (await options.shouldCancel())) {
+      cancelled = true;
+      break;
+    }
+    const product = products[i];
+    let outcome: PushOutcome;
     try {
-      const outcome = await pushOneProduct(auth, product, locationId, resolver);
-      outcomes.push(outcome);
+      outcome = await pushOneProduct(auth, product, locationId, resolver);
     } catch (error) {
-      outcomes.push({
+      outcome = {
         handle: product.handle,
         ok: false,
         message: error instanceof Error ? error.message : "Unknown error"
-      });
+      };
+    }
+    outcomes.push(outcome);
+    if (outcome.ok) ok += 1;
+    else failed += 1;
+    try {
+      await options.onProgress?.({ index: i, total: products.length, ok, failed, outcome });
+    } catch {
+      // never let progress reporting break the push
     }
   }
-  const ok = outcomes.filter((o) => o.ok).length;
-  return { outcomes, totals: { ok, failed: outcomes.length - ok } };
+  return { outcomes, totals: { ok, failed, cancelled } };
 }

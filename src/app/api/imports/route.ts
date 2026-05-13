@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { createDraftChanges, type DraftInput } from "@/lib/drafts";
-import { importSummary } from "@/lib/mock-data";
+import { createDraftChanges, getActiveStoreIdOrThrow, type DraftInput } from "@/lib/drafts";
+import { listImportsForStore } from "@/lib/import-jobs";
 
 type IncomingRow = {
   handle?: string;
@@ -14,7 +14,13 @@ type IncomingRow = {
 };
 
 export async function GET() {
-  return NextResponse.json({ items: [importSummary] });
+  try {
+    const storeId = await getActiveStoreIdOrThrow();
+    const items = await listImportsForStore(BigInt(storeId));
+    return NextResponse.json({ items });
+  } catch {
+    return NextResponse.json({ items: [] });
+  }
 }
 
 export async function POST(request: NextRequest) {

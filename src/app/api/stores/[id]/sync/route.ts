@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { syncStoreCatalog } from "@/lib/shopify-sync";
+
+import { hasRunningSyncJob, startSyncJob } from "@/lib/sync-jobs";
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -10,23 +11,23 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   }
 
   try {
-    const result = await syncStoreCatalog(storeId);
+    const storeBigId = BigInt(storeId);
+    if (await hasRunningSyncJob(storeBigId)) {
+      return NextResponse.json(
+        { success: true, alreadyRunning: true, message: "A sync is already running for this store." },
+        { status: 200 }
+      );
+    }
+    const job = await startSyncJob(storeBigId);
     return NextResponse.json({
       success: true,
-      queued: false,
+      queued: true,
       storeId,
       jobType: "shopify.initialSync",
-      ...result
+      job
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sync failed";
-    return NextResponse.json(
-      {
-        success: false,
-        storeId,
-        error: message
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, storeId, error: message }, { status: 500 });
   }
 }

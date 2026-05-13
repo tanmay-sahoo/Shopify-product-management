@@ -386,8 +386,46 @@ async function pushProductDelete(draft: DraftRow): Promise<PushResult> {
   }
 
   if (product) {
+    // Capture the variant ids so we can wipe metafields and inventory-sync
+    // rows that reference them, before the variant rows themselves go away.
+    const variants = await prisma.variant.findMany({
+      where: { productId: product.id },
+      select: { id: true }
+    });
+    const variantIds = variants.map((v) => v.id);
+
     await prisma.variantImage.deleteMany({ where: { productId: product.id } });
     await prisma.productImage.deleteMany({ where: { productId: product.id } });
+
+    // Schema-bootstrap tables have no Prisma relation back to Product/Variant,
+    // so they need explicit raw cleanup.
+    await prisma.$executeRawUnsafe(`DELETE FROM \`ProductMetafield\` WHERE \`productId\` = ?`, product.id);
+    if (variantIds.length > 0) {
+      const placeholders = variantIds.map(() => "?").join(",");
+      await prisma.$executeRawUnsafe(
+        `DELETE FROM \`VariantMetafield\` WHERE \`variantId\` IN (${placeholders})`,
+        ...variantIds
+      );
+      await prisma.$executeRawUnsafe(
+        `DELETE FROM \`InventorySyncGroupItem\` WHERE \`variantId\` IN (${placeholders})`,
+        ...variantIds
+      );
+    }
+
+    // Clear any DraftChange rows still pointing at this product or its variants
+    // so they don't become orphans the user has to manually clean up.
+    await prisma.draftChange.deleteMany({
+      where: {
+        storeId: draft.storeId,
+        OR: [
+          { entityType: "product", entityId: product.id },
+          ...(variantIds.length > 0
+            ? [{ entityType: "variant" as const, entityId: { in: variantIds } }]
+            : [])
+        ]
+      }
+    });
+
     await prisma.variant.deleteMany({ where: { productId: product.id } });
     await prisma.product.delete({ where: { id: product.id } });
   }
@@ -454,6 +492,17 @@ async function pushVariantDelete(draft: DraftRow): Promise<PushResult> {
 
   if (variant) {
     await prisma.variantImage.deleteMany({ where: { variantId: variant.id } });
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM \`VariantMetafield\` WHERE \`variantId\` = ?`,
+      variant.id
+    );
+    await prisma.$executeRawUnsafe(
+      `DELETE FROM \`InventorySyncGroupItem\` WHERE \`variantId\` = ?`,
+      variant.id
+    );
+    await prisma.draftChange.deleteMany({
+      where: { storeId: draft.storeId, entityType: "variant", entityId: variant.id }
+    });
     await prisma.variant.delete({ where: { id: variant.id } });
   }
 

@@ -70,6 +70,9 @@ export function ProductTable({ products, store }: Props) {
   const [statusFilter, setStatusFilter] = useState("");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  // When the user clicks "Select all X products" we flip this flag so bulk
+  // actions apply to every filtered product, not just the current page.
+  const [selectAllAcrossPages, setSelectAllAcrossPages] = useState(false);
   const [editorProduct, setEditorProduct] = useState<Product | null>(null);
   const [editorMode, setEditorMode] = useState<"create" | "edit">("edit");
   const [editorOpen, setEditorOpen] = useState(false);
@@ -146,6 +149,7 @@ export function ProductTable({ products, store }: Props) {
   }
 
   function toggleSelected(id: number) {
+    setSelectAllAcrossPages(false);
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -155,6 +159,7 @@ export function ProductTable({ products, store }: Props) {
   }
 
   function toggleSelectAll() {
+    setSelectAllAcrossPages(false);
     const pageIds = pagedProducts.map((p) => p.id);
     if (pageIds.every((id) => selected.has(id))) {
       setSelected((prev) => {
@@ -169,6 +174,16 @@ export function ProductTable({ products, store }: Props) {
         return next;
       });
     }
+  }
+
+  function selectEveryFilteredProduct() {
+    setSelected(new Set(filteredProducts.map((p) => p.id)));
+    setSelectAllAcrossPages(true);
+  }
+
+  function clearAllSelection() {
+    setSelected(new Set());
+    setSelectAllAcrossPages(false);
   }
 
   async function handleExport() {
@@ -316,6 +331,37 @@ export function ProductTable({ products, store }: Props) {
             ) : null}
           </span>
         </div>
+
+        {selected.size > 0 && totalPages > 1 && filteredProducts.length > pagedProducts.length ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line/70 bg-sky-50 px-6 py-2 text-xs text-sky-900">
+            {selectAllAcrossPages ? (
+              <>
+                <span>
+                  <span className="font-semibold">All {filteredProducts.length} products</span> across all pages are
+                  selected.
+                </span>
+                <button
+                  onClick={clearAllSelection}
+                  className="rounded-md border border-sky-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-900 hover:bg-sky-100"
+                >
+                  Clear selection
+                </button>
+              </>
+            ) : (
+              <>
+                <span>
+                  All <span className="font-semibold">{pagedProducts.length}</span> products on this page are selected.
+                </span>
+                <button
+                  onClick={selectEveryFilteredProduct}
+                  className="rounded-md border border-sky-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-sky-900 hover:bg-sky-100"
+                >
+                  Select all {filteredProducts.length} products
+                </button>
+              </>
+            )}
+          </div>
+        ) : null}
 
         <div className="max-h-[70vh] overflow-auto">
           {filteredProducts.length === 0 ? (
@@ -679,7 +725,7 @@ export function ProductTable({ products, store }: Props) {
         selectedIds={Array.from(selected)}
         vendors={vendors}
         productTypes={types}
-        onClear={() => setSelected(new Set())}
+        onClear={clearAllSelection}
         onApplied={handleSaved}
       />
 

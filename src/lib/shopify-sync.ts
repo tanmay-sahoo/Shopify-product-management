@@ -23,52 +23,63 @@ type MetafieldsConnection = {
   edges: Array<{ node: MetafieldNode }>;
 };
 
+type ShopifyProductNode = {
+  id: string;
+  handle: string | null;
+  title: string | null;
+  descriptionHtml: string | null;
+  status: "ACTIVE" | "DRAFT" | "ARCHIVED";
+  vendor: string | null;
+  productType: string | null;
+  tags: string[];
+  updatedAt: string;
+  seo: { title: string | null; description: string | null } | null;
+  media: {
+    edges: Array<{
+      node: {
+        id: string;
+        alt: string | null;
+        image?: { url: string | null; altText: string | null } | null;
+        preview?: { image?: { url: string | null; altText: string | null } | null } | null;
+      };
+    }>;
+  };
+  variants: {
+    edges: Array<{
+      node: {
+        id: string;
+        title: string | null;
+        sku: string | null;
+        barcode: string | null;
+        price: string | null;
+        compareAtPrice: string | null;
+        inventoryQuantity: number | null;
+        updatedAt: string;
+        inventoryItem?: { id: string | null } | null;
+      };
+    }>;
+  };
+};
+
 type ShopifyProductsResponse = {
   data?: {
     products: {
       pageInfo: { hasNextPage: boolean; endCursor: string | null };
-      edges: Array<{
-        node: {
-          id: string;
-          handle: string | null;
-          title: string | null;
-          descriptionHtml: string | null;
-          status: "ACTIVE" | "DRAFT" | "ARCHIVED";
-          vendor: string | null;
-          productType: string | null;
-          tags: string[];
-          updatedAt: string;
-          seo: { title: string | null; description: string | null } | null;
-          media: {
-            edges: Array<{
-              node: {
-                id: string;
-                alt: string | null;
-                image?: { url: string | null; altText: string | null } | null;
-                preview?: { image?: { url: string | null; altText: string | null } | null } | null;
-              };
-            }>;
-          };
-          variants: {
-            edges: Array<{
-              node: {
-                id: string;
-                title: string | null;
-                sku: string | null;
-                barcode: string | null;
-                price: string | null;
-                compareAtPrice: string | null;
-                inventoryQuantity: number | null;
-                updatedAt: string;
-                inventoryItem?: { id: string | null } | null;
-              };
-            }>;
-          };
-        };
-      }>;
+      edges: Array<{ node: ShopifyProductNode }>;
     };
   };
   errors?: Array<{ message: string }>;
+};
+
+export type SyncProgress = {
+  phase: "fetching" | "metafields" | "cleanup" | "done";
+  current: number;
+  total: number | null;
+  message?: string;
+};
+
+export type SyncOptions = {
+  onProgress?: (p: SyncProgress) => void | Promise<void>;
 };
 
 async function fetchAllMetafields(
@@ -124,8 +135,6 @@ async function replaceMetafields(
     ownerId
   );
 
-  // Dedupe by (namespace, key) — Shopify can hand back the same standard
-  // taxonomy metafield twice during pagination overlaps.
   const deduped = new Map<string, MetafieldNode>();
   for (const node of nodes) {
     if (!node.namespace || !node.key || !node.type) continue;
@@ -133,8 +142,6 @@ async function replaceMetafields(
   }
 
   for (const node of deduped.values()) {
-    // ON DUPLICATE KEY UPDATE makes this idempotent even if a duplicate slips
-    // past the in-memory dedupe (e.g. two GIDs for the same namespace.key).
     await db.$executeRawUnsafe(
       `INSERT INTO \`${table}\` (storeId, ${ownerColumn}, shopifyMetafieldId, namespace, metafieldKey, type, value, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3))
@@ -177,15 +184,29 @@ type MediaRow = {
   status: "linked";
 };
 
-export async function syncStoreCatalog(storeId: bigint | number) {
+function rawUpdatedAt(raw: Prisma.JsonValue | null | undefined): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = (raw as Record<string, unknown>).updatedAt;
+  return typeof value === "string" ? value : null;
+}
+
+export async function syncStoreCatalog(
+  storeId: bigint | number,
+  options: SyncOptions = {}
+) {
   const db = getPrismaClient();
+  const report = async (progress: SyncProgress) => {
+    try {
+      await options.onProgress?.(progress);
+    } catch {
+      // never let progress reporting break the sync
+    }
+  };
+
   const store = await db.store.findUnique({
     where: { id: BigInt(storeId) }
   });
-
-  if (!store) {
-    throw new Error("Store not found");
-  }
+  if (!store) throw new Error("Store not found");
 
   const accessToken = decryptValue(store.accessTokenEncrypted);
 
@@ -196,6 +217,17 @@ export async function syncStoreCatalog(storeId: bigint | number) {
     );
   }
 
+  // ---- Phase 1: fetch all products+variants, upsert without metafields ----
+  await report({ phase: "fetching", current: 0, total: null, message: "Fetching products from Shopify…" });
+
+  type PendingMetafieldFetch = {
+    ownerType: "product" | "variant";
+    shopifyOwnerId: string;
+    localOwnerId: bigint;
+  };
+
+  const pendingMetafieldFetches: PendingMetafieldFetch[] = [];
+  const seenShopifyVariantIdsByProductId = new Map<string, Set<string>>();
   let cursor: string | null = null;
   let hasNextPage = true;
   let syncedProducts = 0;
@@ -213,10 +245,8 @@ export async function syncStoreCatalog(storeId: bigint | number) {
       throw new Error(response.errors.map((error: { message: string }) => error.message).join("; "));
     }
 
-    const connection: NonNullable<ShopifyProductsResponse["data"]>["products"] | undefined = response.data?.products;
-    if (!connection) {
-      break;
-    }
+    const connection = response.data?.products;
+    if (!connection) break;
 
     for (const edge of connection.edges) {
       const productNode = edge.node;
@@ -242,26 +272,24 @@ export async function syncStoreCatalog(storeId: bigint | number) {
         }
       });
 
-      let productRecord;
+      const productUnchanged =
+        existingProduct && rawUpdatedAt(existingProduct.rawShopifyJson) === productNode.updatedAt;
+
+      let productRecord = existingProduct;
       if (existingProduct) {
-        productRecord = await db.product.update({
-          where: { id: existingProduct.id },
-          data: productPayload
-        });
+        if (!productUnchanged) {
+          productRecord = await db.product.update({
+            where: { id: existingProduct.id },
+            data: productPayload
+          });
+        }
       } else {
         try {
           productRecord = await db.product.create({
-            data: {
-              storeId: store.id,
-              shopifyProductId: productNode.id,
-              ...productPayload
-            }
+            data: { storeId: store.id, shopifyProductId: productNode.id, ...productPayload }
           });
         } catch (error) {
-          if (
-            error instanceof Prisma.PrismaClientKnownRequestError &&
-            error.code === "P2002"
-          ) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
             const resolvedProduct = await db.product.findUnique({
               where: {
                 storeId_shopifyProductId: {
@@ -270,11 +298,7 @@ export async function syncStoreCatalog(storeId: bigint | number) {
                 }
               }
             });
-
-            if (!resolvedProduct) {
-              throw error;
-            }
-
+            if (!resolvedProduct) throw error;
             productRecord = await db.product.update({
               where: { id: resolvedProduct.id },
               data: productPayload
@@ -284,85 +308,163 @@ export async function syncStoreCatalog(storeId: bigint | number) {
           }
         }
       }
+      if (!productRecord) continue;
+      const productLocalId = productRecord.id;
 
-      const productMfNodes = await fetchAllMetafields(
-        "product",
-        productNode.id,
-        store.shopDomain,
-        accessToken
-      );
-      await replaceMetafields("product", store.id, productRecord.id, productMfNodes);
+      if (!productUnchanged) {
+        pendingMetafieldFetches.push({
+          ownerType: "product",
+          shopifyOwnerId: productNode.id,
+          localOwnerId: productLocalId
+        });
+      }
 
-      await db.variant.deleteMany({
-        where: {
-          storeId: store.id,
-          productId: productRecord.id
-        }
-      });
+      // ---- Variants: upsert by (storeId, shopifyVariantId) — no flicker ----
+      const seenVariantIds = new Set<string>();
+      seenShopifyVariantIdsByProductId.set(productNode.id, seenVariantIds);
 
       for (const variantEdge of productNode.variants.edges) {
         const variantNode = variantEdge.node;
-        const createdVariant = await db.variant.create({
-          data: {
-            storeId: store.id,
-            productId: productRecord.id,
-            shopifyVariantId: variantNode.id,
-            sku: variantNode.sku ?? "",
-            barcode: variantNode.barcode ?? "",
-            title: variantNode.title ?? "",
-            option1Name: "Option 1",
-            option1Value: variantNode.title ?? "",
-            price: variantNode.price ? Number(variantNode.price) : null,
-            compareAtPrice: variantNode.compareAtPrice ? Number(variantNode.compareAtPrice) : null,
-            inventoryQuantity: variantNode.inventoryQuantity ?? 0,
-            inventoryItemId: variantNode.inventoryItem?.id ?? null,
-            rawShopifyJson: variantNode as unknown as Prisma.InputJsonValue
-          }
+        seenVariantIds.add(variantNode.id);
+
+        const existingVariant = await db.variant.findFirst({
+          where: { storeId: store.id, shopifyVariantId: variantNode.id }
         });
-        const variantMfNodes = await fetchAllMetafields(
-          "variant",
-          variantNode.id,
-          store.shopDomain,
-          accessToken
-        );
-        await replaceMetafields("variant", store.id, createdVariant.id, variantMfNodes);
+
+        const variantUnchanged =
+          existingVariant && rawUpdatedAt(existingVariant.rawShopifyJson) === variantNode.updatedAt;
+
+        const variantData = {
+          storeId: store.id,
+          productId: productLocalId,
+          shopifyVariantId: variantNode.id,
+          sku: variantNode.sku ?? "",
+          barcode: variantNode.barcode ?? "",
+          title: variantNode.title ?? "",
+          option1Name: "Option 1",
+          option1Value: variantNode.title ?? "",
+          price: variantNode.price ? Number(variantNode.price) : null,
+          compareAtPrice: variantNode.compareAtPrice ? Number(variantNode.compareAtPrice) : null,
+          inventoryQuantity: variantNode.inventoryQuantity ?? 0,
+          inventoryItemId: variantNode.inventoryItem?.id ?? null,
+          rawShopifyJson: variantNode as unknown as Prisma.InputJsonValue
+        };
+
+        let variantRecord = existingVariant;
+        if (existingVariant) {
+          if (!variantUnchanged) {
+            variantRecord = await db.variant.update({
+              where: { id: existingVariant.id },
+              data: {
+                productId: productLocalId,
+                sku: variantData.sku,
+                barcode: variantData.barcode,
+                title: variantData.title,
+                price: variantData.price,
+                compareAtPrice: variantData.compareAtPrice,
+                inventoryQuantity: variantData.inventoryQuantity,
+                inventoryItemId: variantData.inventoryItemId,
+                rawShopifyJson: variantData.rawShopifyJson
+              }
+            });
+          }
+        } else {
+          variantRecord = await db.variant.create({ data: variantData });
+        }
+        if (!variantRecord) continue;
+
+        if (!variantUnchanged) {
+          pendingMetafieldFetches.push({
+            ownerType: "variant",
+            shopifyOwnerId: variantNode.id,
+            localOwnerId: variantRecord.id
+          });
+        }
         syncedVariants += 1;
       }
 
+      // Replace product media (cheap, no Shopify call).
       await db.productImage.deleteMany({
-        where: {
-          storeId: store.id,
-          productId: productRecord.id
-        }
+        where: { storeId: store.id, productId: productLocalId }
       });
-
       const mediaRows = productNode.media.edges
-        .map((mediaEdge: { node: { id: string; alt: string | null; image?: { url: string | null; altText: string | null } | null; preview?: { image?: { url: string | null; altText: string | null } | null } | null } }, index: number) => {
+        .map((mediaEdge, index): MediaRow | null => {
           const url = extractImageUrl(mediaEdge.node);
-          if (!url) {
-            return null;
-          }
+          if (!url) return null;
           return {
             storeId: store.id,
-            productId: productRecord.id,
+            productId: productLocalId,
             shopifyMediaId: mediaEdge.node.id,
             sourceUrl: url,
-            altText: mediaEdge.node.alt ?? mediaEdge.node.image?.altText ?? mediaEdge.node.preview?.image?.altText ?? "",
+            altText:
+              mediaEdge.node.alt ??
+              mediaEdge.node.image?.altText ??
+              mediaEdge.node.preview?.image?.altText ??
+              "",
             position: index + 1,
             status: "linked" as const
           };
         })
-        .filter((value: MediaRow | null): value is MediaRow => Boolean(value));
-
+        .filter((value): value is MediaRow => Boolean(value));
       if (mediaRows.length > 0) {
         await db.productImage.createMany({ data: mediaRows });
       }
 
       syncedProducts += 1;
+      await report({
+        phase: "fetching",
+        current: syncedProducts,
+        total: null,
+        message: `Fetched ${syncedProducts} products…`
+      });
     }
 
     hasNextPage = connection.pageInfo.hasNextPage;
     cursor = connection.pageInfo.endCursor;
+  }
+
+  // ---- Phase 2: metafields for changed owners only ----
+  const totalMfs = pendingMetafieldFetches.length;
+  await report({
+    phase: "metafields",
+    current: 0,
+    total: totalMfs,
+    message: totalMfs === 0 ? "No metafield updates needed." : `Fetching metafields for ${totalMfs} item(s)…`
+  });
+
+  let mfDone = 0;
+  for (const task of pendingMetafieldFetches) {
+    const nodes = await fetchAllMetafields(task.ownerType, task.shopifyOwnerId, store.shopDomain, accessToken);
+    await replaceMetafields(task.ownerType, store.id, task.localOwnerId, nodes);
+    mfDone += 1;
+    if (mfDone % 5 === 0 || mfDone === totalMfs) {
+      await report({
+        phase: "metafields",
+        current: mfDone,
+        total: totalMfs,
+        message: `Metafields ${mfDone}/${totalMfs}`
+      });
+    }
+  }
+
+  // ---- Phase 3: cleanup orphan variants whose shopifyVariantId no longer exists ----
+  await report({ phase: "cleanup", current: 0, total: null, message: "Removing deleted variants…" });
+  for (const [shopifyProductId, seenVariantIds] of seenShopifyVariantIdsByProductId) {
+    const product = await db.product.findUnique({
+      where: { storeId_shopifyProductId: { storeId: store.id, shopifyProductId } }
+    });
+    if (!product) continue;
+    if (seenVariantIds.size === 0) {
+      await db.variant.deleteMany({ where: { storeId: store.id, productId: product.id } });
+      continue;
+    }
+    await db.variant.deleteMany({
+      where: {
+        storeId: store.id,
+        productId: product.id,
+        shopifyVariantId: { notIn: Array.from(seenVariantIds) }
+      }
+    });
   }
 
   await db.store.update({
@@ -379,6 +481,13 @@ export async function syncStoreCatalog(storeId: bigint | number) {
       startedAt: new Date(),
       completedAt: new Date()
     }
+  });
+
+  await report({
+    phase: "done",
+    current: syncedProducts,
+    total: syncedProducts,
+    message: `Synced ${syncedProducts} products, ${syncedVariants} variants.`
   });
 
   return { syncedProducts, syncedVariants };
