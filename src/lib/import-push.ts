@@ -38,6 +38,20 @@ const FIND_PRODUCT_BY_HANDLE = `
   }
 `;
 
+function toProductGid(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("gid://")) return trimmed;
+  return `gid://shopify/Product/${trimmed}`;
+}
+
+function toVariantGid(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("gid://")) return trimmed;
+  return `gid://shopify/ProductVariant/${trimmed}`;
+}
+
 const PRODUCT_CREATE = `
   mutation ProductCreate($product: ProductCreateInput!) {
     productCreate(product: $product) {
@@ -128,6 +142,7 @@ const PRODUCT_SNAPSHOT_QUERY = `
   query ProductSnapshot($id: ID!) {
     product(id: $id) {
       id
+      handle
       title
       descriptionHtml
       vendor
@@ -386,6 +401,7 @@ function normalisedOptionKey(variant: ParsedVariant): string {
 // a backup — Shopify keeps SKUs unique per product, so two rows with the
 // same non-empty SKU are always the same variant.
 function dedupeVariantsByOptions(variants: ParsedVariant[]): ParsedVariant[] {
+  const byVariantId = new Map<string, ParsedVariant>();
   const byOptionKey = new Map<string, ParsedVariant>();
   const bySku = new Map<string, ParsedVariant>();
   const merge = (target: ParsedVariant, incoming: ParsedVariant) => {
@@ -398,24 +414,29 @@ function dedupeVariantsByOptions(variants: ParsedVariant[]): ParsedVariant[] {
   };
 
   for (const v of variants) {
+    const idKey = (v.variantId ?? "").trim();
     const optionKey = normalisedOptionKey(v);
     const skuKey = (v.sku ?? "").trim();
 
-    let target = byOptionKey.get(optionKey);
+    let target: ParsedVariant | undefined;
+    if (idKey) target = byVariantId.get(idKey);
+    if (!target) target = byOptionKey.get(optionKey);
     if (!target && skuKey) target = bySku.get(skuKey);
 
     if (!target) {
       const copy: ParsedVariant = { ...v };
+      if (idKey) byVariantId.set(idKey, copy);
       byOptionKey.set(optionKey, copy);
       if (skuKey) bySku.set(skuKey, copy);
       continue;
     }
     merge(target, v);
+    if (idKey) byVariantId.set(idKey, target);
     byOptionKey.set(optionKey, target);
     if (skuKey) bySku.set(skuKey, target);
   }
-  // De-dup the resulting list (a variant could land in both maps).
-  return Array.from(new Set(byOptionKey.values()));
+  // De-dup the resulting list (a variant could land in multiple maps).
+  return Array.from(new Set([...byVariantId.values(), ...byOptionKey.values()]));
 }
 
 function variantOptionValues(
@@ -486,6 +507,7 @@ function userErrorMessage(errors: Array<{ field: string[] | null; message: strin
 
 // Snapshot we read once per existing product for partial-update diffing.
 type ProductSnapshot = {
+  handle: string | null;
   title: string | null;
   descriptionHtml: string | null;
   vendor: string | null;
@@ -518,6 +540,7 @@ async function fetchProductSnapshot(auth: ShopAuth, productId: string): Promise<
   type Resp = {
     data?: {
       product?: {
+        handle: string | null;
         title: string | null;
         descriptionHtml: string | null;
         vendor: string | null;
@@ -562,6 +585,7 @@ async function fetchProductSnapshot(auth: ShopAuth, productId: string): Promise<
     const p = resp.data?.product;
     if (!p) return null;
     return {
+      handle: p.handle,
       title: p.title,
       descriptionHtml: p.descriptionHtml,
       vendor: p.vendor,
@@ -634,8 +658,13 @@ async function pushOneProduct(
   locationId: string | null,
   resolver: DestinationResolver
 ): Promise<PushOutcome> {
-  // 1. Resolve product ID (find or create stub).
-  let productId = await findProductIdByHandle(auth, product.handle);
+  // 1. Resolve product ID (find or create stub). When the CSV row carries an
+  // explicit Shopify product ID we trust it — that's how a handle rename works
+  // (the old handle would no longer match a find-by-handle lookup).
+  let productId: string | null = product.productId ? toProductGid(product.productId) : null;
+  if (!productId) {
+    productId = await findProductIdByHandle(auth, product.handle);
+  }
   // Track whether this product existed in Shopify before this push. We use
   // this further down to skip the image-upload phase entirely for already-
   // existing products — otherwise re-imports of the same CSV (with different
@@ -735,13 +764,37 @@ async function pushOneProduct(
     // Pull current snapshot; if we can't read it, fall back to a conservative
     // productUpdate without variant changes (we don't want to wipe variants).
     const snapshot = await fetchProductSnapshot(auth, productId);
+    // When the row pinned the product by ID (rather than handle lookup) and
+    // Shopify says no such product exists, surface that as a hard error
+    // instead of silently doing nothing. Most common cause: Excel rounded
+    // the long numeric ID to scientific notation when the CSV was saved.
+    if (!snapshot && product.productId) {
+      return {
+        handle: product.handle,
+        ok: false,
+        message:
+          `Product ID ${product.productId} not found in Shopify. ` +
+          `If you opened the CSV in Excel, it may have rounded the ID — ` +
+          `re-export and open in Google Sheets or set the ID column to Text.`,
+        productId
+      };
+    }
 
-    // Diff the product-level fields. Only push ones that actually changed.
+    // Diff the product-level fields. Partial-update semantics: only patch a
+    // field if the CSV row actually carried a value for it. An empty cell
+    // means "leave alone" — never "clear" — so users can submit narrow
+    // CSVs (e.g. ID + new Handle only) without wiping unrelated fields.
     const productPatch: Record<string, unknown> = { id: productId };
     let productPatched = false;
-    const incomingTitle = product.title || product.handle;
-    if (snapshot && snapshot.title !== incomingTitle) {
-      productPatch.title = incomingTitle;
+    // Handle rename: only meaningful when the CSV row pinned the product by
+    // ID. If the row lacked an ID we already used the handle to find the
+    // product, so it can't differ.
+    if (snapshot && product.productId && product.handle && snapshot.handle !== product.handle) {
+      productPatch.handle = product.handle;
+      productPatched = true;
+    }
+    if (snapshot && product.title && snapshot.title !== product.title) {
+      productPatch.title = product.title;
       productPatched = true;
     }
     if (snapshot && product.bodyHtml && (snapshot.descriptionHtml ?? "") !== product.bodyHtml) {
@@ -756,18 +809,23 @@ async function pushOneProduct(
       productPatch.productType = product.productType;
       productPatched = true;
     }
-    if (snapshot && !arraysEqualIgnoringOrder(snapshot.tags, product.tags)) {
+    if (snapshot && product.tags.length > 0 && !arraysEqualIgnoringOrder(snapshot.tags, product.tags)) {
       productPatch.tags = product.tags;
       productPatched = true;
     }
-    const incomingStatus = statusEnum(product.status);
-    if (snapshot && (snapshot.status ?? "").toUpperCase() !== incomingStatus) {
-      productPatch.status = incomingStatus;
-      productPatched = true;
+    if (snapshot && product.status) {
+      const incomingStatus = statusEnum(product.status);
+      if ((snapshot.status ?? "").toUpperCase() !== incomingStatus) {
+        productPatch.status = incomingStatus;
+        productPatched = true;
+      }
     }
-    if (snapshot) {
-      const incomingSeoTitle = product.seoTitle || "";
-      const incomingSeoDesc = product.seoDescription || "";
+    if (snapshot && (product.seoTitle || product.seoDescription)) {
+      // Only patch SEO if the user provided at least one of the two fields.
+      // Preserve the other side from the snapshot so we don't accidentally
+      // blank out a field the CSV didn't carry.
+      const incomingSeoTitle = product.seoTitle || snapshot.seo?.title || "";
+      const incomingSeoDesc = product.seoDescription || snapshot.seo?.description || "";
       const currentSeoTitle = snapshot.seo?.title ?? "";
       const currentSeoDesc = snapshot.seo?.description ?? "";
       if (currentSeoTitle !== incomingSeoTitle || currentSeoDesc !== incomingSeoDesc) {
@@ -794,27 +852,38 @@ async function pushOneProduct(
       }
     }
 
-    // Variant diff. Match incoming variants to existing by SKU. For matched
-    // ones, only patch fields that actually changed. Variants that exist in
+    // Variant diff. Match incoming variants to existing by Variant ID first
+    // (so SKU renames are safe), then fall back to SKU. For matched ones,
+    // only patch fields that actually changed. Variants that exist in
     // Shopify but not in the CSV are LEFT ALONE — Shopify's bulk import has
     // the same additive behaviour.
     const incomingVariants = dedupeVariantsByOptions(product.variants);
+    const existingById = new Map<string, ProductSnapshot["variants"][number]>();
     const existingBySku = new Map<string, ProductSnapshot["variants"][number]>();
     for (const v of snapshot?.variants ?? []) {
+      existingById.set(v.id, v);
       if (v.sku) existingBySku.set(v.sku.trim(), v);
     }
 
     const variantPatches: Array<Record<string, unknown>> = [];
     const variantsToCreate: ParsedVariant[] = [];
     for (const incoming of incomingVariants) {
+      const variantGid = incoming.variantId ? toVariantGid(incoming.variantId) : "";
       const sku = (incoming.sku ?? "").trim();
-      const existing = sku ? existingBySku.get(sku) : undefined;
+      const existing =
+        (variantGid && existingById.get(variantGid)) ||
+        (sku ? existingBySku.get(sku) : undefined);
       if (!existing) {
         variantsToCreate.push(incoming);
         continue;
       }
       const patch: Record<string, unknown> = { id: existing.id };
       let changed = false;
+      // SKU rename: only allow when the row pinned the variant by ID.
+      if (incoming.variantId && sku && (existing.sku ?? "") !== sku) {
+        patch.sku = sku;
+        changed = true;
+      }
       if (incoming.price && !decimalEquals(existing.price, incoming.price)) {
         patch.price = incoming.price;
         changed = true;
@@ -985,38 +1054,19 @@ async function pushOneProduct(
   }
 
   if (orderedUrls.length > 0) {
-    // Always fetch what's already there so we can reuse media when attaching
-    // to variants (step 3b) — without this lookup, productVariantAppendMedia
-    // can't find the existing MediaImage GIDs.
+    // Fetch existing media so we can (a) reuse GIDs for variant-image attach,
+    // and (b) skip URLs whose filename already matches a Shopify-side image.
+    // Shopify CDN preserves the original filename, so a re-uploaded export
+    // dedupes cleanly. Brand-new URLs the operator added in the CSV get
+    // uploaded as new media — that's how round-trip image edits work.
     const existingByFilename = await fetchExistingMediaByFilename(auth, productId);
     const urlsToUpload: string[] = [];
-
-    // HARD GUARANTEE: if the product already existed in Shopify and already
-    // has any media on it, we skip uploads entirely. This is the only way to
-    // guarantee zero duplicates when the operator re-imports a CSV whose image
-    // URLs may not match the filenames Shopify stored them under. The variant-
-    // image attach step still runs against whatever media IS already on the
-    // product (matched by filename).
-    const skipImageUploads = productExistedBefore && existingByFilename.size > 0;
-
-    if (skipImageUploads) {
-      console.info(
-        `[import-push] ${product.handle}: product already has ${existingByFilename.size} media — skipping image upload phase to avoid duplicates`
-      );
-      // Map every CSV image URL to its existing media (by filename) so variant
-      // attach still works.
-      for (const url of orderedUrls) {
-        const existingId = existingByFilename.get(filenameOf(url));
-        if (existingId) mediaIdBySourceUrl.set(url, existingId);
-      }
-    } else {
-      for (const url of orderedUrls) {
-        const existingId = existingByFilename.get(filenameOf(url));
-        if (existingId) {
-          mediaIdBySourceUrl.set(url, existingId);
-        } else {
-          urlsToUpload.push(url);
-        }
+    for (const url of orderedUrls) {
+      const existingId = existingByFilename.get(filenameOf(url));
+      if (existingId) {
+        mediaIdBySourceUrl.set(url, existingId);
+      } else {
+        urlsToUpload.push(url);
       }
     }
 
@@ -1088,9 +1138,11 @@ async function pushOneProduct(
       variantImagesUnmatched++;
       return;
     }
-    const matched = parsedVariant.sku
-      ? createdVariants.find((edge) => edge.node.sku === parsedVariant.sku)
-      : createdVariants[idx];
+    const parsedGid = parsedVariant.variantId ? toVariantGid(parsedVariant.variantId) : "";
+    const matched =
+      (parsedGid && createdVariants.find((edge) => edge.node.id === parsedGid)) ||
+      (parsedVariant.sku ? createdVariants.find((edge) => edge.node.sku === parsedVariant.sku) : undefined) ||
+      createdVariants[idx];
     const variantGid = matched?.node.id;
     if (!variantGid) {
       variantImagesUnmatched++;
@@ -1189,9 +1241,11 @@ async function pushOneProduct(
   for (let idx = 0; idx < product.variants.length; idx++) {
     const parsedVariant = product.variants[idx];
     if (parsedVariant.metafields.length === 0) continue;
-    const matched = parsedVariant.sku
-      ? variantsByIndex.find((edge) => edge.node.sku === parsedVariant.sku)
-      : variantsByIndex[idx];
+    const parsedGid = parsedVariant.variantId ? toVariantGid(parsedVariant.variantId) : "";
+    const matched =
+      (parsedGid && variantsByIndex.find((edge) => edge.node.id === parsedGid)) ||
+      (parsedVariant.sku ? variantsByIndex.find((edge) => edge.node.sku === parsedVariant.sku) : undefined) ||
+      variantsByIndex[idx];
     const variantGid = matched?.node.id;
     if (!variantGid) continue;
     for (const mf of parsedVariant.metafields) {
@@ -1235,9 +1289,11 @@ async function pushOneProduct(
     product.variants.forEach((parsedVariant, idx) => {
       const qty = Number(parsedVariant.inventoryQuantity);
       if (!Number.isFinite(qty) || parsedVariant.inventoryQuantity.trim() === "") return;
-      const matched = parsedVariant.sku
-        ? variantsByIndex.find((edge) => edge.node.sku === parsedVariant.sku)
-        : variantsByIndex[idx];
+      const parsedGid = parsedVariant.variantId ? toVariantGid(parsedVariant.variantId) : "";
+      const matched =
+        (parsedGid && variantsByIndex.find((edge) => edge.node.id === parsedGid)) ||
+        (parsedVariant.sku ? variantsByIndex.find((edge) => edge.node.sku === parsedVariant.sku) : undefined) ||
+        variantsByIndex[idx];
       const invItem = matched?.node.inventoryItem?.id;
       if (!invItem) return;
       // Skip the write if Shopify already has the same quantity.

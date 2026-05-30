@@ -150,6 +150,7 @@ function variantOptionValue(variant: ExportProduct["variants"][number], index: 1
 
 const STANDARD_COLUMNS = [
   "Handle",
+  "ID",
   "Title",
   "Body (HTML)",
   "Vendor",
@@ -164,6 +165,7 @@ const STANDARD_COLUMNS = [
   "Option3 Name",
   "Option3 Value",
   "Variant SKU",
+  "Variant ID",
   "Variant Grams",
   "Variant Inventory Tracker",
   "Variant Inventory Qty",
@@ -327,7 +329,11 @@ export function toEnhancedCsv(products: ExportProduct[], options: ExportOptions 
 
       const row = emptyRow(allColumns);
       row.Handle = baseHandle;
+      const numericProductId = (raw?.id ?? "").toString().split("/").pop() ?? "";
+      const numericVariantId = (variantRaw?.id ?? "").toString().split("/").pop() ?? "";
+      row["Variant ID"] = numericVariantId;
       if (isFirst) {
+        row.ID = numericProductId;
         row.Title = product.title;
         row["Body (HTML)"] = product.bodyHtml;
         row.Vendor = product.vendor;
@@ -340,7 +346,6 @@ export function toEnhancedCsv(products: ExportProduct[], options: ExportOptions 
         row["SEO Description"] = product.seoDescription;
         row["Gift Card"] = bool(raw?.isGiftCard ?? false);
         row["Product URL"] = baseHandle ? `https://${host}/products/${baseHandle}` : "";
-        const numericProductId = (raw?.id ?? "").toString().split("/").pop() ?? "";
         row["Admin URL"] = numericProductId
           ? `https://admin.shopify.com/store/${slug}/products/${numericProductId}`
           : "";
