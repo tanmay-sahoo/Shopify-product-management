@@ -40,6 +40,7 @@ enum ImportType {
   prices
   inventory
   images
+  collections
 }
 
 enum ImportStatus {

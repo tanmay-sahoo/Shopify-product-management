@@ -43,6 +43,25 @@ async function bootstrap() {
     console.info("[schema-bootstrap] added Store.currencyCode column");
   }
 
+  // Extend the Import.importType enum with 'collections' if missing. Guarded so
+  // we only run the (table-locking) MODIFY when the value isn't already present.
+  {
+    const rows = await getPrismaClient().$queryRaw<{ COLUMN_TYPE: string }[]>(
+      Prisma.sql`SELECT COLUMN_TYPE
+                 FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = DATABASE()
+                   AND TABLE_NAME = 'Import'
+                   AND COLUMN_NAME = 'importType'`
+    );
+    const columnType = rows[0]?.COLUMN_TYPE ?? "";
+    if (columnType && !columnType.includes("collections")) {
+      await prisma.$executeRawUnsafe(
+        "ALTER TABLE `Import` MODIFY `importType` ENUM('products','variants','prices','inventory','images','collections') NOT NULL DEFAULT 'products'"
+      );
+      console.info("[schema-bootstrap] added 'collections' to Import.importType enum");
+    }
+  }
+
   // Import-job progress columns. Plain VARCHAR/INT to keep migrations cheap.
   if (!(await columnExists("Import", "phase"))) {
     await prisma.$executeRawUnsafe(

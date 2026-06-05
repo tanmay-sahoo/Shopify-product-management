@@ -25,6 +25,7 @@ type ImportJob = {
   id: string;
   storeId: string;
   fileName: string | null;
+  importType?: "products" | "collections";
   status: "uploaded" | "processing" | "pushing" | "completed" | "failed";
   phase: string;
   currentCount: number;
@@ -85,7 +86,9 @@ export function ImportUploader({ initial: _initial }: { initial: ImportSummary }
       const listRes = await fetch("/api/imports", { cache: "no-store" });
       if (!listRes.ok) return;
       const listPayload = (await listRes.json()) as { items?: ImportJob[] };
-      const items = listPayload.items ?? [];
+      // Only product imports belong to this view — collection imports are shown
+      // in the Collections tab's own panel.
+      const items = (listPayload.items ?? []).filter((it) => it.importType !== "collections");
       setHistory(items);
       const latest = items[0] ?? null;
       if (!latest) {

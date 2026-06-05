@@ -1,8 +1,20 @@
 import { Prisma } from "@prisma/client";
 
+import { buildCollectionsReportCsv } from "@/lib/collections-import-report";
 import { getPrismaClient } from "@/lib/prisma";
 import { getImport } from "@/lib/import-jobs";
 import { ensureSchemaCompatibility } from "@/lib/schema-bootstrap";
+
+function csvAttachment(body: string, fileName: string, suffix: string): Response {
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/\.csv$/i, "");
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${safeName}-${suffix}.csv"`
+    }
+  });
+}
 
 // Re-emit a CSV of every failed product row from this import, so the operator
 // can fix and re-upload. We persist the parsed product as JSON, so we flatten
@@ -96,6 +108,12 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   if (!job) return new Response("Not found", { status: 404 });
 
   await ensureSchemaCompatibility();
+
+  if (job.importType === "collections") {
+    const csv = await buildCollectionsReportCsv(BigInt(importId), "error");
+    return csvAttachment(csv, job.fileName ?? `import-${importId}`, "errors");
+  }
+
   const db = getPrismaClient();
   const rows = await db.$queryRaw<
     { handle: string | null; pushError: string | null; rowData: Prisma.JsonValue }[]
