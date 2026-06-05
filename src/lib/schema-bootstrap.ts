@@ -153,6 +153,48 @@ async function bootstrap() {
   `);
 
   await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`Collection\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`shopifyCollectionId\` VARCHAR(255) NOT NULL,
+      \`handle\` VARCHAR(255) NULL,
+      \`title\` VARCHAR(500) NULL,
+      \`bodyHtml\` LONGTEXT NULL,
+      \`sortOrder\` VARCHAR(50) NULL,
+      \`templateSuffix\` VARCHAR(255) NULL,
+      \`isSmart\` TINYINT(1) NOT NULL DEFAULT 0,
+      \`productsCount\` INT NOT NULL DEFAULT 0,
+      \`seoTitle\` VARCHAR(255) NULL,
+      \`seoDescription\` TEXT NULL,
+      \`rawShopifyJson\` JSON NULL,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`Collection_storeId_idx\` (\`storeId\`),
+      UNIQUE INDEX \`Collection_storeId_shopifyCollectionId_unique\` (\`storeId\`, \`shopifyCollectionId\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS \`CollectionMetafield\` (
+      \`id\` BIGINT NOT NULL AUTO_INCREMENT,
+      \`storeId\` BIGINT NOT NULL,
+      \`collectionId\` BIGINT NOT NULL,
+      \`shopifyMetafieldId\` VARCHAR(255) NULL,
+      \`namespace\` VARCHAR(255) NOT NULL,
+      \`metafieldKey\` VARCHAR(255) NOT NULL,
+      \`type\` VARCHAR(255) NOT NULL,
+      \`value\` MEDIUMTEXT NULL,
+      \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+      \`updatedAt\` DATETIME(3) NOT NULL,
+      PRIMARY KEY (\`id\`),
+      INDEX \`CollectionMetafield_collectionId_idx\` (\`collectionId\`),
+      INDEX \`CollectionMetafield_storeId_idx\` (\`storeId\`),
+      UNIQUE INDEX \`CollectionMetafield_collectionId_namespace_key_unique\` (\`collectionId\`, \`namespace\`, \`metafieldKey\`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS \`AppSetting\` (
       \`settingKey\` VARCHAR(100) NOT NULL,
       \`value\` TEXT NULL,

@@ -1,5 +1,24 @@
 import Link from "next/link";
 
+export function DatabaseUnreachable() {
+  return (
+    <section className="rounded-3xl border border-dashed border-rose-200 bg-rose-50/40 px-8 py-16 text-center shadow-sm">
+      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-rose-100 text-rose-600">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-6 w-6">
+          <ellipse cx="12" cy="5" rx="9" ry="3" />
+          <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+          <line x1="3" y1="5" x2="21" y2="19" />
+        </svg>
+      </div>
+      <h2 className="mt-5 text-xl font-semibold text-ink">Can&apos;t reach the database</h2>
+      <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-muted">
+        The app couldn&apos;t connect to its database server. This is usually temporary — check that the database is
+        running and reachable, then reload. Your data is safe; nothing was changed.
+      </p>
+    </section>
+  );
+}
+
 export function NoStoreConnected() {
   return (
     <section className="rounded-3xl border border-dashed border-line bg-white px-8 py-16 text-center shadow-sm">

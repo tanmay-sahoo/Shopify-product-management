@@ -193,3 +193,42 @@ export const VARIANT_METAFIELDS_PAGE_QUERY = `
     }
   }
 `;
+
+export const COLLECTIONS_SYNC_QUERY = `
+  query CollectionsSync($cursor: String) {
+    collections(first: 100, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      edges {
+        node {
+          id
+          handle
+          title
+          descriptionHtml
+          updatedAt
+          sortOrder
+          templateSuffix
+          seo { title description }
+          productsCount { count }
+          ruleSet {
+            appliedDisjunctively
+            rules { column relation condition }
+          }
+        }
+      }
+    }
+  }
+`;
+
+export const COLLECTION_METAFIELDS_PAGE_QUERY = `
+  query CollectionMetafieldsPage($id: ID!, $cursor: String) {
+    collection(id: $id) {
+      metafields(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        edges { node { id namespace key value type } }
+      }
+    }
+  }
+`;

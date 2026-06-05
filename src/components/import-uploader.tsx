@@ -2,10 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { CollectionImportPanel } from "@/components/collection-import-panel";
 import { StatCard } from "@/components/stat-card";
 import { cn, formatDate } from "@/lib/utils";
 import type { ImportSummary } from "@/lib/types";
 import type { ParsedProduct } from "@/lib/import-parser";
+
+type ImportMode = "products" | "collections";
 
 type ParseResult = {
   importId: string;
@@ -63,6 +66,7 @@ function isRunning(job: ImportJob | null): boolean {
 
 export function ImportUploader({ initial: _initial }: { initial: ImportSummary }) {
   void _initial;
+  const [mode, setMode] = useState<ImportMode>("products");
   const inputRef = useRef<HTMLInputElement>(null);
   const [parsed, setParsed] = useState<ParseResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -185,6 +189,36 @@ export function ImportUploader({ initial: _initial }: { initial: ImportSummary }
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-muted">Import type</span>
+        <div className="inline-flex rounded-2xl border border-line bg-canvas p-1">
+          <button
+            type="button"
+            onClick={() => setMode("products")}
+            className={cn(
+              "rounded-xl px-4 py-2 text-sm font-semibold transition",
+              mode === "products" ? "bg-brand text-white shadow-panel" : "text-muted hover:text-ink"
+            )}
+          >
+            Products
+          </button>
+          <button
+            type="button"
+            onClick={() => setMode("collections")}
+            className={cn(
+              "rounded-xl px-4 py-2 text-sm font-semibold transition",
+              mode === "collections" ? "bg-brand text-white shadow-panel" : "text-muted hover:text-ink"
+            )}
+          >
+            Collections
+          </button>
+        </div>
+      </div>
+
+      {mode === "collections" ? (
+        <CollectionImportPanel />
+      ) : (
+      <>
       {showActiveCard && activeJob ? (
         <section className={cn("rounded-3xl border bg-white p-5 shadow-sm", statusTone(activeJob.status))}>
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -413,6 +447,8 @@ export function ImportUploader({ initial: _initial }: { initial: ImportSummary }
           </div>
         </section>
       ) : null}
+      </>
+      )}
     </div>
   );
 }

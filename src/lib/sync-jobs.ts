@@ -170,7 +170,7 @@ export async function startSyncJob(storeId: bigint): Promise<SyncJobRow> {
         phase: "done",
         current: result.syncedProducts,
         total: result.syncedProducts,
-        message: `Synced ${result.syncedProducts} products, ${result.syncedVariants} variants.`,
+        message: `Synced ${result.syncedProducts} products, ${result.syncedVariants} variants, ${result.syncedCollections} collections.`,
         finished: true
       });
     } catch (error) {

@@ -98,7 +98,7 @@ function splitCsvLine(line: string): string[] {
   return out;
 }
 
-function parseCsvRaw(text: string): { headers: string[]; rows: string[][] } {
+export function parseCsvRaw(text: string): { headers: string[]; rows: string[][] } {
   const cleaned = text.replace(/\r\n?/g, "\n").trim();
   if (!cleaned) return { headers: [], rows: [] };
   const lines = cleaned.split("\n");

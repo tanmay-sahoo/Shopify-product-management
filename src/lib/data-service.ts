@@ -101,10 +101,34 @@ export type DashboardData = {
   syncLogs: SyncLog[];
   store: StoreSummary | null;
   stores: StoreSummary[];
+  // Set when the database (or schema bootstrap) couldn't be reached, so pages
+  // can show a friendly "can't reach database" message instead of letting the
+  // raw Prisma error escape the Server Component and leak the connection string.
+  dbError?: boolean;
+};
+
+const EMPTY_DASHBOARD: DashboardData = {
+  stats: EMPTY_STATS,
+  products: [],
+  variants: [],
+  importSummary: EMPTY_IMPORT,
+  draftChanges: [],
+  syncLogs: [],
+  store: null,
+  stores: []
 };
 
 export async function getDashboardData(): Promise<DashboardData> {
   const db = getPrismaClient();
+  try {
+    return await loadDashboardData(db);
+  } catch (error) {
+    console.error("[data-service] database unreachable", error);
+    return { ...EMPTY_DASHBOARD, dbError: true };
+  }
+}
+
+async function loadDashboardData(db: ReturnType<typeof getPrismaClient>): Promise<DashboardData> {
   await ensureSchemaCompatibility();
   const activeId = await readActiveStoreId();
   const allStores = await listConnectedStores();

@@ -9,6 +9,7 @@ import {
   fetchShopInfo,
   shopifyGraphQLRequest
 } from "@/lib/shopify";
+import { syncStoreCollections } from "@/lib/shopify-collections-sync";
 
 type MetafieldNode = {
   id: string;
@@ -72,7 +73,7 @@ type ShopifyProductsResponse = {
 };
 
 export type SyncProgress = {
-  phase: "fetching" | "metafields" | "cleanup" | "done";
+  phase: "fetching" | "metafields" | "collections" | "cleanup" | "done";
   current: number;
   total: number | null;
   message?: string;
@@ -467,6 +468,15 @@ export async function syncStoreCatalog(
     });
   }
 
+  // ---- Phase 4: collections (custom + smart) and their metafields ----
+  const { syncedCollections } = await syncStoreCollections({
+    storeId: store.id,
+    shopDomain: store.shopDomain,
+    accessToken,
+    report: (p) =>
+      report({ phase: "collections", current: p.current, total: p.total, message: p.message })
+  });
+
   await db.store.update({
     where: { id: store.id },
     data: { lastSyncAt: new Date() }
@@ -477,7 +487,7 @@ export async function syncStoreCatalog(
       storeId: store.id,
       jobType: "shopify.initialSync",
       status: "success",
-      message: `Synced ${syncedProducts} products and ${syncedVariants} variants.`,
+      message: `Synced ${syncedProducts} products, ${syncedVariants} variants, ${syncedCollections} collections.`,
       startedAt: new Date(),
       completedAt: new Date()
     }
@@ -487,8 +497,8 @@ export async function syncStoreCatalog(
     phase: "done",
     current: syncedProducts,
     total: syncedProducts,
-    message: `Synced ${syncedProducts} products, ${syncedVariants} variants.`
+    message: `Synced ${syncedProducts} products, ${syncedVariants} variants, ${syncedCollections} collections.`
   });
 
-  return { syncedProducts, syncedVariants };
+  return { syncedProducts, syncedVariants, syncedCollections };
 }

@@ -1,5 +1,5 @@
 import { DashboardShell } from "@/components/dashboard-shell";
-import { NoStoreConnected } from "@/components/empty-state";
+import { DatabaseUnreachable, NoStoreConnected } from "@/components/empty-state";
 import { SectionHeader } from "@/components/section-header";
 import { StatCard } from "@/components/stat-card";
 import { ProductTable } from "@/components/product-table";
@@ -60,7 +60,19 @@ const statusTone: Record<string, string> = {
 };
 
 export default async function DashboardPage() {
-  const { stats, products, store, stores, syncLogs } = await getDashboardData();
+  const { stats, products, store, stores, syncLogs, dbError } = await getDashboardData();
+
+  if (dbError) {
+    return (
+      <DashboardShell store={null} stores={[]}>
+        <SectionHeader
+          title="Overview"
+          description="Stage product edits safely, validate bulk changes, and review activity before pushing to Shopify."
+        />
+        <DatabaseUnreachable />
+      </DashboardShell>
+    );
+  }
 
   if (!store) {
     return (
