@@ -102,6 +102,14 @@ export const PRODUCTS_SYNC_QUERY = `
             title
             description
           }
+          collections(first: 50) {
+            edges {
+              node {
+                handle
+                title
+              }
+            }
+          }
           media(first: 250) {
             edges {
               node {
@@ -211,6 +219,7 @@ export const COLLECTIONS_SYNC_QUERY = `
           sortOrder
           templateSuffix
           seo { title description }
+          image { url altText }
           productsCount { count }
           ruleSet {
             appliedDisjunctively

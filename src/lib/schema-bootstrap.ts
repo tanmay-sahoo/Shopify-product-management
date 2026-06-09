@@ -185,6 +185,8 @@ async function bootstrap() {
       \`productsCount\` INT NOT NULL DEFAULT 0,
       \`seoTitle\` VARCHAR(255) NULL,
       \`seoDescription\` TEXT NULL,
+      \`imageUrl\` TEXT NULL,
+      \`imageAlt\` VARCHAR(500) NULL,
       \`rawShopifyJson\` JSON NULL,
       \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
       \`updatedAt\` DATETIME(3) NOT NULL,
@@ -212,6 +214,14 @@ async function bootstrap() {
       UNIQUE INDEX \`CollectionMetafield_collectionId_namespace_key_unique\` (\`collectionId\`, \`namespace\`, \`metafieldKey\`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
+
+  // Collection image columns (added after the Collection table shipped).
+  if (!(await columnExists("Collection", "imageUrl"))) {
+    await prisma.$executeRawUnsafe("ALTER TABLE `Collection` ADD COLUMN `imageUrl` TEXT NULL");
+  }
+  if (!(await columnExists("Collection", "imageAlt"))) {
+    await prisma.$executeRawUnsafe("ALTER TABLE `Collection` ADD COLUMN `imageAlt` VARCHAR(500) NULL");
+  }
 
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS \`AppSetting\` (

@@ -32,6 +32,7 @@ type ShopifyCollectionNode = {
   sortOrder: string | null;
   templateSuffix: string | null;
   seo: { title: string | null; description: string | null } | null;
+  image: { url: string | null; altText: string | null } | null;
   productsCount: { count: number | null } | null;
   ruleSet: CollectionRuleSet;
 };
@@ -163,6 +164,8 @@ async function upsertCollection(
     productsCount: node.productsCount?.count ?? 0,
     seoTitle: node.seo?.title ?? "",
     seoDescription: node.seo?.description ?? "",
+    imageUrl: node.image?.url ?? "",
+    imageAlt: node.image?.altText ?? "",
     rawShopifyJson: JSON.stringify(node)
   };
 
@@ -173,7 +176,7 @@ async function upsertCollection(
         `UPDATE \`Collection\` SET
            handle = ?, title = ?, bodyHtml = ?, sortOrder = ?, templateSuffix = ?,
            isSmart = ?, productsCount = ?, seoTitle = ?, seoDescription = ?,
-           rawShopifyJson = ?, updatedAt = NOW(3)
+           imageUrl = ?, imageAlt = ?, rawShopifyJson = ?, updatedAt = NOW(3)
          WHERE id = ?`,
         fields.handle,
         fields.title,
@@ -184,6 +187,8 @@ async function upsertCollection(
         fields.productsCount,
         fields.seoTitle,
         fields.seoDescription,
+        fields.imageUrl,
+        fields.imageAlt,
         fields.rawShopifyJson,
         existing.id
       );
@@ -194,8 +199,8 @@ async function upsertCollection(
   await db.$executeRawUnsafe(
     `INSERT INTO \`Collection\`
        (storeId, shopifyCollectionId, handle, title, bodyHtml, sortOrder, templateSuffix,
-        isSmart, productsCount, seoTitle, seoDescription, rawShopifyJson, updatedAt)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
+        isSmart, productsCount, seoTitle, seoDescription, imageUrl, imageAlt, rawShopifyJson, updatedAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(3))`,
     storeId,
     node.id,
     fields.handle,
@@ -207,6 +212,8 @@ async function upsertCollection(
     fields.productsCount,
     fields.seoTitle,
     fields.seoDescription,
+    fields.imageUrl,
+    fields.imageAlt,
     fields.rawShopifyJson
   );
 

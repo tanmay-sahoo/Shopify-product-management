@@ -8,9 +8,11 @@ import { parseCsvRaw, type ParsedMetafield } from "@/lib/import-parser";
 
 export type ParsedCollection = {
   rowNumber: number;
-  // Numeric Shopify ID or full gid, as provided in the CSV.
+  // Numeric Shopify ID or full gid, as provided in the CSV. Empty when the row
+  // is matched by handle instead (cross-shop restore).
   id: string;
-  // True if the row provided an ID value (even if it failed to parse).
+  // True if the row provided an ID value (even if it failed to parse). When
+  // false, the push matches by handle and creates the collection if missing.
   idProvided: boolean;
   // Optional fields — undefined means the column was absent or empty, so the
   // push leaves that field untouched.
@@ -21,6 +23,8 @@ export type ParsedCollection = {
   templateSuffix?: string;
   seoTitle?: string;
   seoDescription?: string;
+  imageSrc?: string;
+  imageAlt?: string;
   metafields: ParsedMetafield[];
 };
 
@@ -54,11 +58,19 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
 
   const headerIndex = new Map<string, number>();
   headers.forEach((h, i) => headerIndex.set(h.toLowerCase(), i));
-  const hasId = headerIndex.has("id");
-  if (!hasId) {
+  const hasIdCol = headerIndex.has("id");
+  const hasHandleCol = headerIndex.has("handle");
+  if (!hasIdCol && !hasHandleCol) {
     return {
       collections: [],
-      errors: [{ row: 0, message: "Missing required ID column (collections are matched by Collection ID)" }]
+      errors: [
+        {
+          row: 0,
+          message:
+            "Missing required ID or Handle column. Use ID to update collections in the same shop, " +
+            "or Handle to update/create them in another shop."
+        }
+      ]
     };
   }
 
@@ -102,14 +114,18 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
     if (row.every((cell) => cell.trim() === "")) return; // trailing blank line
 
     const rawIdCell = val(row, "ID").trim();
+    const handleCell = val(row, "Handle").trim();
     const idProvided = rawIdCell !== "";
-    const normalizedId = normalizeId(rawIdCell);
 
-    if (!idProvided) {
-      errors.push({ row: rowNumber, message: "Missing Collection ID" });
+    // A row is identified by ID (same-shop update) or, when no ID is present,
+    // by Handle (cross-shop update/create).
+    if (!idProvided && !handleCell) {
+      errors.push({ row: rowNumber, message: "Missing Collection ID and Handle (need one to match the collection)" });
       return;
     }
-    if (normalizedId === SCIENTIFIC_ID) {
+
+    const normalizedId = idProvided ? normalizeId(rawIdCell) : "";
+    if (idProvided && normalizedId === SCIENTIFIC_ID) {
       errors.push({
         row: rowNumber,
         message:
@@ -137,7 +153,7 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
     const collection: ParsedCollection = {
       rowNumber,
       id: normalizedId,
-      idProvided: true,
+      idProvided,
       title: optional(row, "Title"),
       bodyHtml: optional(row, "Body (HTML)", "Body HTML"),
       handle: optional(row, "Handle"),
@@ -145,6 +161,8 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       templateSuffix: optional(row, "Template Suffix"),
       seoTitle: optional(row, "SEO Title"),
       seoDescription: optional(row, "SEO Description"),
+      imageSrc: optional(row, "Image Src", "Image"),
+      imageAlt: optional(row, "Image Alt"),
       metafields
     };
 
@@ -158,11 +176,12 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       collection.templateSuffix !== undefined ||
       collection.seoTitle !== undefined ||
       collection.seoDescription !== undefined ||
+      collection.imageSrc !== undefined ||
       metafields.length > 0;
     if (!hasAnyField) {
       errors.push({
         row: rowNumber,
-        message: `Collection ${normalizedId} has no fields or metafields to update (row skipped)`
+        message: `Collection ${normalizedId || handleCell} has no fields or metafields to update (row skipped)`
       });
       return;
     }

@@ -64,6 +64,8 @@ export type ParsedProduct = {
   option1Name: string;
   option2Name: string;
   option3Name: string;
+  // Manual-collection handles this product should belong to (additive on import).
+  collections: string[];
   variants: ParsedVariant[];
   images: ParsedImage[];
   metafields: ParsedMetafield[];
@@ -150,6 +152,7 @@ function emptyProduct(handle: string): ParsedProduct {
     option1Name: "",
     option2Name: "",
     option3Name: "",
+    collections: [],
     variants: [],
     images: [],
     metafields: []
@@ -308,6 +311,10 @@ export function parseShopifyCsv(text: string): ParseResult {
       product.option1Name = val(row, "Option1 Name");
       product.option2Name = val(row, "Option2 Name");
       product.option3Name = val(row, "Option3 Name");
+      product.collections = val(row, "Collections")
+        .split(",")
+        .map((handle) => handle.trim())
+        .filter(Boolean);
 
       for (const col of metafieldCols.filter((c) => c.scope === "Product")) {
         const value = row[col.index] ?? "";

@@ -176,9 +176,11 @@ export function CollectionImportPanel() {
   return (
     <div className="space-y-6">
       <p className="rounded-2xl border border-line/70 bg-slate-50/60 px-4 py-3 text-xs leading-5 text-muted">
-        Partial-update collections by <span className="font-semibold">ID</span>. Only the columns you include change;
-        empty cells are left alone. Smart-collection rules are never modified. Tip: export from the Collections page,
-        edit, then upload here. Run a store sync afterward to refresh the Collections view.
+        Provide an <span className="font-semibold">ID</span> to update collections in <span className="font-semibold">this</span> shop,
+        or remove the ID and keep <span className="font-semibold">Handle</span> to update/create them in{" "}
+        <span className="font-semibold">another</span> shop (a portable backup). Only the columns you include change;
+        empty cells are left alone. Created collections are manual — smart-collection rules can&apos;t be carried in a CSV.
+        Run a store sync afterward to refresh the Collections view.
       </p>
 
       {showActiveCard && activeJob ? (
@@ -242,8 +244,9 @@ export function CollectionImportPanel() {
         </div>
         <h4 className="mt-4 text-base font-semibold text-ink">Drop a collections CSV here</h4>
         <p className="mt-1 text-sm text-muted">
-          Required column: <span className="font-mono">ID</span>. Optional: Title, Body (HTML), Handle, Sort Order,
-          Template Suffix, SEO Title/Description, and <span className="font-mono">Collection Metafield: ns.key [type]</span>.
+          Required: <span className="font-mono">ID</span> or <span className="font-mono">Handle</span>. Optional: Title,
+          Body (HTML), Sort Order, Template Suffix, SEO Title/Description, and{" "}
+          <span className="font-mono">Collection Metafield: ns.key [type]</span>. For another shop, remove the ID column.
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
           <input

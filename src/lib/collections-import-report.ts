@@ -16,6 +16,8 @@ type StoredCollection = {
   templateSuffix?: string;
   seoTitle?: string;
   seoDescription?: string;
+  imageSrc?: string;
+  imageAlt?: string;
 };
 
 function escape(value: unknown): string {
@@ -31,7 +33,9 @@ const FIELD_HEADERS = [
   "Sort Order",
   "Template Suffix",
   "SEO Title",
-  "SEO Description"
+  "SEO Description",
+  "Image Src",
+  "Image Alt"
 ];
 
 export async function buildCollectionsReportCsv(
@@ -62,7 +66,9 @@ export async function buildCollectionsReportCsv(
       c.sortOrder ?? "",
       c.templateSuffix ?? "",
       c.seoTitle ?? "",
-      c.seoDescription ?? ""
+      c.seoDescription ?? "",
+      c.imageSrc ?? "",
+      c.imageAlt ?? ""
     ];
     const values = kind === "error" ? [row.pushError ?? "", ...fields] : fields;
     lines.push(values.map(escape).join(","));

@@ -17,6 +17,8 @@ export type ExportCollection = {
   isSmart: boolean;
   seoTitle: string;
   seoDescription: string;
+  imageSrc: string;
+  imageAlt: string;
   metafields: ExportMetafield[];
 };
 
@@ -38,6 +40,8 @@ const STANDARD_COLUMNS = [
   "Type",
   "SEO Title",
   "SEO Description",
+  "Image Src",
+  "Image Alt",
   "Admin URL"
 ] as const;
 
@@ -155,6 +159,8 @@ export function toCollectionsCsv(
     row.Type = collection.isSmart ? "Smart" : "Custom";
     row["SEO Title"] = collection.seoTitle;
     row["SEO Description"] = collection.seoDescription;
+    row["Image Src"] = collection.imageSrc;
+    row["Image Alt"] = collection.imageAlt;
     row["Admin URL"] = collection.id
       ? `https://admin.shopify.com/store/${slug}/collections/${collection.id}`
       : "";

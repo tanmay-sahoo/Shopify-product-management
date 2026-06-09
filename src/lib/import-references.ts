@@ -31,6 +31,40 @@ const COLLECTION_BY_HANDLE = `
   }
 `;
 
+const FILE_BY_FILENAME = `
+  query FindFile($q: String!) {
+    files(first: 1, query: $q) {
+      edges { node { ... on MediaImage { id } ... on GenericFile { id } ... on Video { id } } }
+    }
+  }
+`;
+
+const FILE_CREATE = `
+  mutation FileCreate($files: [FileCreateInput!]!) {
+    fileCreate(files: $files) {
+      files { ... on MediaImage { id } ... on GenericFile { id } ... on Video { id } }
+      userErrors { field message }
+    }
+  }
+`;
+
+// Last path segment of a URL, without the query string.
+function filenameOfUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return (u.pathname.split("/").pop() ?? "").trim();
+  } catch {
+    return (url.split("?")[0].split("/").pop() ?? "").trim();
+  }
+}
+
+function fileContentType(url: string): "IMAGE" | "VIDEO" | "FILE" {
+  const lower = url.split("?")[0].toLowerCase();
+  if (/\.(jpe?g|png|gif|webp|heic|bmp|svg|tiff?)$/.test(lower)) return "IMAGE";
+  if (/\.(mp4|mov|webm|m4v)$/.test(lower)) return "VIDEO";
+  return "FILE";
+}
+
 type Auth = { shopDomain: string; accessToken: string };
 
 export class DestinationResolver {
@@ -41,6 +75,13 @@ export class DestinationResolver {
   async resolve(portable: string): Promise<string | null> {
     if (!portable) return null;
     if (this.cache.has(portable)) return this.cache.get(portable) ?? null;
+
+    // file:<url> — the URL contains colons, so handle it before the ":" split.
+    if (portable.startsWith("file:")) {
+      const gid = await this.resolveFile(portable.slice("file:".length));
+      this.cache.set(portable, gid);
+      return gid;
+    }
 
     const parts = portable.split(":");
     const kind = parts[0];
@@ -107,6 +148,52 @@ export class DestinationResolver {
 
     this.cache.set(portable, gid);
     return gid;
+  }
+
+  // Resolve a file:<url> portable ref to a destination File GID. Reuses an
+  // existing file with the same filename when present (so re-imports don't pile
+  // up duplicates), otherwise uploads the file from its source URL.
+  private async resolveFile(url: string): Promise<string | null> {
+    if (!url) return null;
+    try {
+      const filename = filenameOfUrl(url);
+
+      if (filename) {
+        type FindResp = {
+          data?: { files?: { edges?: Array<{ node: { id?: string } }> } };
+        };
+        const found = await shopifyGraphQLRequest<FindResp>({
+          shopDomain: this.auth.shopDomain,
+          accessToken: this.auth.accessToken,
+          query: FILE_BY_FILENAME,
+          variables: { q: `filename:${filename}` }
+        });
+        const existing = found.data?.files?.edges?.[0]?.node?.id;
+        if (existing) return existing;
+      }
+
+      type CreateResp = {
+        data?: {
+          fileCreate?: {
+            files?: Array<{ id?: string }>;
+            userErrors?: Array<{ field: string[] | null; message: string }>;
+          };
+        };
+        errors?: Array<{ message: string }>;
+      };
+      const created = await shopifyGraphQLRequest<CreateResp>({
+        shopDomain: this.auth.shopDomain,
+        accessToken: this.auth.accessToken,
+        query: FILE_CREATE,
+        variables: {
+          files: [{ originalSource: url, contentType: fileContentType(url) }]
+        }
+      });
+      if (created.data?.fileCreate?.userErrors?.length) return null;
+      return created.data?.fileCreate?.files?.[0]?.id ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async resolveValue(rawValue: string, type: string, ref: string | undefined): Promise<string | null> {

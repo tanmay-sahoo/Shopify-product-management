@@ -21,6 +21,8 @@ type CollectionRow = {
   isSmart: number | boolean | null;
   seoTitle: string | null;
   seoDescription: string | null;
+  imageUrl: string | null;
+  imageAlt: string | null;
 };
 
 type MetafieldRow = {
@@ -72,7 +74,7 @@ async function exportCollectionsCsv() {
 
   const rows = await prisma.$queryRaw<CollectionRow[]>(
     Prisma.sql`SELECT id, shopifyCollectionId, handle, title, bodyHtml, sortOrder, templateSuffix,
-                      isSmart, seoTitle, seoDescription
+                      isSmart, seoTitle, seoDescription, imageUrl, imageAlt
                FROM \`Collection\`
                WHERE storeId = ${store.id}
                ORDER BY title ASC`
@@ -90,6 +92,8 @@ async function exportCollectionsCsv() {
     isSmart: Boolean(Number(row.isSmart ?? 0)),
     seoTitle: row.seoTitle ?? "",
     seoDescription: row.seoDescription ?? "",
+    imageSrc: row.imageUrl ?? "",
+    imageAlt: row.imageAlt ?? "",
     metafields: metafieldsById.get(String(row.id)) ?? []
   }));
 

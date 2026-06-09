@@ -261,6 +261,17 @@ function CollectionDetail({
   const description = stripHtml(collection.bodyHtml);
   return (
     <div className="flex flex-col gap-4">
+      {collection.imageUrl ? (
+        <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={collection.imageUrl}
+            alt={collection.imageAlt || collection.title}
+            className="h-16 w-16 rounded-xl border border-line/70 object-cover"
+          />
+          <span className="text-xs text-muted">Collection image</span>
+        </div>
+      ) : null}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <DetailField label="Collection ID" value={numericId(collection.shopifyCollectionId)} mono />
         <DetailField label="Sort order" value={collection.sortOrder || "—"} />

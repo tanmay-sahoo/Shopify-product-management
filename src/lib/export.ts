@@ -58,6 +58,7 @@ type RawProduct = {
   category?: { fullName?: string | null; name?: string | null } | null;
   seo?: { title?: string | null; description?: string | null } | null;
   options?: Array<{ name?: string | null; values?: string[] | null; position?: number | null }> | null;
+  collections?: { edges?: Array<{ node?: { handle?: string | null; title?: string | null } | null }> } | null;
 };
 
 export type ExportMetafield = {
@@ -192,6 +193,7 @@ const STANDARD_COLUMNS = [
   "Country of Origin",
   "Harmonized System Code",
   "Status",
+  "Collections",
   "Product URL",
   "Admin URL"
 ] as const;
@@ -342,6 +344,10 @@ export function toEnhancedCsv(products: ExportProduct[], options: ExportOptions 
         row.Tags = product.tags.join(", ");
         row.Published = product.status === "active" ? "TRUE" : "FALSE";
         row.Status = product.status;
+        row.Collections = (raw?.collections?.edges ?? [])
+          .map((edge) => edge?.node?.handle ?? "")
+          .filter(Boolean)
+          .join(", ");
         row["SEO Title"] = product.seoTitle;
         row["SEO Description"] = product.seoDescription;
         row["Gift Card"] = bool(raw?.isGiftCard ?? false);

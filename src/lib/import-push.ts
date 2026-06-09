@@ -340,6 +340,14 @@ const INVENTORY_SET = `
   }
 `;
 
+const COLLECTION_ADD_PRODUCTS = `
+  mutation CollectionAddProducts($id: ID!, $productIds: [ID!]!) {
+    collectionAddProducts(id: $id, productIds: $productIds) {
+      userErrors { field message }
+    }
+  }
+`;
+
 const LOCATIONS_QUERY = `
   query Locations {
     locations(first: 5) { edges { node { id isActive fulfillsOnlineOrders } } }
@@ -1329,10 +1337,40 @@ async function pushOneProduct(
     }
   }
 
+  // 6. Collection membership. Additive — add the product to each listed manual
+  //    collection (by handle). Smart collections are rule-based and reject manual
+  //    adds, so those are skipped. Never removes the product from collections.
+  let collectionsAdded = 0;
+  if (product.collections && product.collections.length > 0) {
+    for (const handle of product.collections) {
+      const trimmed = handle.trim();
+      if (!trimmed) continue;
+      const collectionGid = await resolver.resolve(`collection:${trimmed}`);
+      if (!collectionGid) continue; // collection doesn't exist in destination — skip
+      try {
+        type Resp = {
+          data?: { collectionAddProducts?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
+          errors?: Array<{ message: string }>;
+        };
+        const resp = await shopifyGraphQLRequest<Resp>({
+          shopDomain: auth.shopDomain,
+          accessToken: auth.accessToken,
+          query: COLLECTION_ADD_PRODUCTS,
+          variables: { id: collectionGid, productIds: [productId] }
+        });
+        if (!resp.errors?.length && !resp.data?.collectionAddProducts?.userErrors?.length) {
+          collectionsAdded++;
+        }
+      } catch {
+        // Smart collection or transient error — skip this membership.
+      }
+    }
+  }
+
   return {
     handle: product.handle,
     ok: true,
-    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)`,
+    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}`,
     productId,
     variantsCreated: dedupedForAttach.length,
     imagesCreated,

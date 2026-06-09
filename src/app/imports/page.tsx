@@ -11,7 +11,7 @@ export default async function ImportsPage() {
     <DashboardShell store={store} stores={stores}>
       <SectionHeader
         title="Bulk Import"
-        description="Upload a CSV to bulk-update Products or Collections. Choose the import type below. Product uploads are parsed and pushed as tracked import jobs; Collection uploads are partial-updates matched by Collection ID."
+        description="Upload a CSV to bulk-update Products or Collections. Choose the import type below. Collection uploads match by ID (same shop) or by Handle (another shop — creates missing collections), and run as tracked import jobs."
       />
       {dbError ? (
         <DatabaseUnreachable />

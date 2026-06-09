@@ -25,6 +25,8 @@ export type CollectionView = {
   productsCount: number;
   seoTitle: string;
   seoDescription: string;
+  imageUrl: string;
+  imageAlt: string;
   updatedAt: string;
   metafields: CollectionMetafieldView[];
 };
@@ -50,6 +52,8 @@ type CollectionRow = {
   productsCount: number | null;
   seoTitle: string | null;
   seoDescription: string | null;
+  imageUrl: string | null;
+  imageAlt: string | null;
   updatedAt: Date;
 };
 
@@ -109,7 +113,7 @@ export async function getCollectionsData(): Promise<CollectionsData> {
 
     const rows = await db.$queryRaw<CollectionRow[]>(
       Prisma.sql`SELECT id, shopifyCollectionId, handle, title, bodyHtml, sortOrder, templateSuffix,
-                        isSmart, productsCount, seoTitle, seoDescription, updatedAt
+                        isSmart, productsCount, seoTitle, seoDescription, imageUrl, imageAlt, updatedAt
                  FROM \`Collection\`
                  WHERE storeId = ${storeRow.id}
                  ORDER BY title ASC`
@@ -129,6 +133,8 @@ export async function getCollectionsData(): Promise<CollectionsData> {
     productsCount: Number(row.productsCount ?? 0),
     seoTitle: row.seoTitle ?? "",
     seoDescription: row.seoDescription ?? "",
+    imageUrl: row.imageUrl ?? "",
+    imageAlt: row.imageAlt ?? "",
     updatedAt: row.updatedAt.toISOString(),
     metafields: metafields.get(String(row.id)) ?? []
   }));
