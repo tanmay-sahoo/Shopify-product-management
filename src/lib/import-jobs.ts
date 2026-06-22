@@ -299,13 +299,16 @@ async function updateImport(
 async function updateImportRowOutcome(
   importId: bigint,
   rowNumber: number,
-  outcome: { ok: boolean; message: string }
+  outcome: { ok: boolean; message: string; warning?: string }
 ) {
   const db = getPrismaClient();
+  // On failure, store the error. On success, store any non-fatal warning (e.g.
+  // skipped/failed metafields) so it's visible in the per-row results.
+  const detail = outcome.ok ? outcome.warning ?? null : outcome.message;
   await db.$executeRaw(
     Prisma.sql`UPDATE \`ImportRow\`
                SET \`pushStatus\` = ${outcome.ok ? "ok" : "error"},
-                   \`pushError\` = ${outcome.ok ? null : outcome.message}
+                   \`pushError\` = ${detail}
                WHERE importId = ${importId} AND rowNumber = ${rowNumber}`
   );
 }
@@ -349,7 +352,11 @@ async function pushCollectionsImport(importId: bigint, storeId: bigint) {
   }
   const result = await pushParsedCollections(storeId, collections, {
     onProgress: async (p) => {
-      await updateImportRowOutcome(importId, p.index + 1, { ok: p.outcome.ok, message: p.outcome.message });
+      await updateImportRowOutcome(importId, p.index + 1, {
+        ok: p.outcome.ok,
+        message: p.outcome.message,
+        warning: p.outcome.warning
+      });
       await updateImport(importId, {
         current: p.index + 1,
         valid: p.ok,

@@ -24,6 +24,9 @@ export type PushOutcome = {
   handle: string;
   ok: boolean;
   message: string;
+  // Non-fatal note shown on otherwise-successful rows (e.g. metafields that were
+  // skipped or rejected) so issues are visible in the import results.
+  warning?: string;
   productId?: string | null;
   variantsCreated?: number;
   imagesCreated?: number;
@@ -1240,9 +1243,18 @@ async function pushOneProduct(
     return { ownerId, namespace: mf.namespace, key: mf.key, type: mf.type, value };
   }
 
+  // Diagnostics: track metafields skipped (unresolvable reference) and failed
+  // (rejected by Shopify — most often the reserved `shopify.*` taxonomy
+  // namespace, or a missing/mismatched definition) so the result can explain
+  // why a metafield didn't land.
+  let metafieldsSkipped = 0;
+  let metafieldsFailed = 0;
+  const mfFailMessages: string[] = [];
+
   for (const mf of product.metafields) {
     const input = await buildMfInput(productId, mf);
     if (input) mfInputs.push(input);
+    else metafieldsSkipped++;
   }
   // Map parsed variants to created variant IDs by SKU when available, else by index order.
   const variantsByIndex = createdVariants;
@@ -1259,6 +1271,7 @@ async function pushOneProduct(
     for (const mf of parsedVariant.metafields) {
       const input = await buildMfInput(variantGid, mf);
       if (input) mfInputs.push(input);
+      else metafieldsSkipped++;
     }
   }
   if (mfInputs.length > 0) {
@@ -1266,7 +1279,9 @@ async function pushOneProduct(
       data?: { metafieldsSet?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
       errors?: Array<{ message: string }>;
     };
-    // Shopify caps metafieldsSet at 25 per call.
+    // Shopify caps metafieldsSet at 25 per call. metafieldsSet is not atomic —
+    // valid metafields in a call still apply even if siblings error — so we
+    // count per userError rather than failing the whole slice.
     for (let i = 0; i < mfInputs.length; i += 25) {
       const slice = mfInputs.slice(i, i + 25);
       const resp = await shopifyGraphQLRequest<Resp>({
@@ -1275,11 +1290,30 @@ async function pushOneProduct(
         query: METAFIELDS_SET,
         variables: { metafields: slice }
       });
-      if (!resp.errors?.length && !resp.data?.metafieldsSet?.userErrors?.length) {
-        metafieldsSet += slice.length;
+      const topErrors = resp.errors?.map((e) => e.message) ?? [];
+      const userErrors = resp.data?.metafieldsSet?.userErrors ?? [];
+      if (topErrors.length > 0) {
+        metafieldsFailed += slice.length;
+        for (const m of topErrors) if (!mfFailMessages.includes(m)) mfFailMessages.push(m);
+      } else {
+        metafieldsFailed += userErrors.length;
+        metafieldsSet += slice.length - userErrors.length;
+        for (const e of userErrors) {
+          const m = `${(e.field ?? []).join(".")}: ${e.message}`;
+          if (!mfFailMessages.includes(m)) mfFailMessages.push(m);
+        }
       }
     }
   }
+
+  const mfWarningParts: string[] = [];
+  if (metafieldsSkipped > 0) mfWarningParts.push(`${metafieldsSkipped} metafield(s) skipped (unresolved reference)`);
+  if (metafieldsFailed > 0) {
+    mfWarningParts.push(
+      `${metafieldsFailed} metafield(s) failed${mfFailMessages.length ? `: ${mfFailMessages.slice(0, 2).join("; ")}` : ""}`
+    );
+  }
+  const metafieldWarning = mfWarningParts.length > 0 ? mfWarningParts.join("; ") : undefined;
 
   // 5. Inventory levels via inventorySetQuantities (per variant with a number).
   if (locationId) {
@@ -1371,6 +1405,7 @@ async function pushOneProduct(
     handle: product.handle,
     ok: true,
     message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}`,
+    warning: metafieldWarning,
     productId,
     variantsCreated: dedupedForAttach.length,
     imagesCreated,

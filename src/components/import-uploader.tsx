@@ -367,7 +367,7 @@ export function ImportUploader({ initial: _initial }: { initial: ImportSummary }
                   <th className="px-4 py-3 font-semibold">Title</th>
                   <th className="px-4 py-3 font-semibold">SKU</th>
                   <th className="px-4 py-3 font-semibold">Status</th>
-                  <th className="px-4 py-3 font-semibold">Error</th>
+                  <th className="px-4 py-3 font-semibold">Error / Note</th>
                 </tr>
               </thead>
               <tbody>

@@ -191,6 +191,14 @@ function rawUpdatedAt(raw: Prisma.JsonValue | null | undefined): string | null {
   return typeof value === "string" ? value : null;
 }
 
+// Whether a stored product payload already captured the `collections` field.
+// Lets us backfill it once for products synced before collection membership
+// was added, without re-fetching everything on every sync.
+function rawHasCollections(raw: Prisma.JsonValue | null | undefined): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  return "collections" in (raw as Record<string, unknown>);
+}
+
 export async function syncStoreCatalog(
   storeId: bigint | number,
   options: SyncOptions = {}
@@ -275,10 +283,14 @@ export async function syncStoreCatalog(
 
       const productUnchanged =
         existingProduct && rawUpdatedAt(existingProduct.rawShopifyJson) === productNode.updatedAt;
+      // One-time backfill: if the stored payload predates the `collections`
+      // field, refresh it even when updatedAt hasn't changed.
+      const needsCollectionsBackfill =
+        existingProduct && !rawHasCollections(existingProduct.rawShopifyJson);
 
       let productRecord = existingProduct;
       if (existingProduct) {
-        if (!productUnchanged) {
+        if (!productUnchanged || needsCollectionsBackfill) {
           productRecord = await db.product.update({
             where: { id: existingProduct.id },
             data: productPayload

@@ -303,7 +303,7 @@ export function CollectionImportPanel() {
                   <th className="px-4 py-3 font-semibold">Title</th>
                   <th className="px-4 py-3 font-semibold">Handle</th>
                   <th className="px-4 py-3 font-semibold">Status</th>
-                  <th className="px-4 py-3 font-semibold">Error</th>
+                  <th className="px-4 py-3 font-semibold">Error / Note</th>
                 </tr>
               </thead>
               <tbody>

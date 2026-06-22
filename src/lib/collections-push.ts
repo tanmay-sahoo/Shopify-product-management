@@ -103,6 +103,8 @@ export type CollectionPushOutcome = {
   title: string;
   ok: boolean;
   message: string;
+  // Non-fatal note shown on successful rows (e.g. metafields skipped/failed).
+  warning?: string;
 };
 
 export type CollectionPushProgress = {
@@ -317,18 +319,26 @@ async function pushOneCollection(
     }
   }
 
-  // Build a message that surfaces what happened to the metafields.
+  // Build a message that surfaces what happened to the metafields, plus a
+  // non-fatal warning (skipped/failed) shown on the successful row.
   const mfNotes: string[] = [`${metafieldsSet} metafield(s)`];
-  if (metafieldsSkipped > 0) mfNotes.push(`${metafieldsSkipped} skipped (unresolved reference)`);
+  const warningParts: string[] = [];
+  if (metafieldsSkipped > 0) {
+    mfNotes.push(`${metafieldsSkipped} skipped (unresolved reference)`);
+    warningParts.push(`${metafieldsSkipped} metafield(s) skipped (unresolved reference)`);
+  }
   if (metafieldsFailed > 0) {
-    mfNotes.push(`${metafieldsFailed} failed${failMessages.length ? `: ${failMessages.slice(0, 2).join("; ")}` : ""}`);
+    const detail = failMessages.length ? `: ${failMessages.slice(0, 2).join("; ")}` : "";
+    mfNotes.push(`${metafieldsFailed} failed${detail}`);
+    warningParts.push(`${metafieldsFailed} metafield(s) failed${detail}`);
   }
 
   return {
     id: collection.id,
     title: label,
     ok: true,
-    message: `${action} ${label}: ${fieldCount} field(s), ${mfNotes.join(", ")}`
+    message: `${action} ${label}: ${fieldCount} field(s), ${mfNotes.join(", ")}`,
+    warning: warningParts.length > 0 ? warningParts.join("; ") : undefined
   };
 }
 

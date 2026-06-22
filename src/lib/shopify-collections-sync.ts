@@ -171,28 +171,30 @@ async function upsertCollection(
 
   if (existing) {
     const changed = rawUpdatedAtFromDb(existing.rawShopifyJson) !== node.updatedAt;
-    if (changed) {
-      await db.$executeRawUnsafe(
-        `UPDATE \`Collection\` SET
-           handle = ?, title = ?, bodyHtml = ?, sortOrder = ?, templateSuffix = ?,
-           isSmart = ?, productsCount = ?, seoTitle = ?, seoDescription = ?,
-           imageUrl = ?, imageAlt = ?, rawShopifyJson = ?, updatedAt = NOW(3)
-         WHERE id = ?`,
-        fields.handle,
-        fields.title,
-        fields.bodyHtml,
-        fields.sortOrder,
-        fields.templateSuffix,
-        fields.isSmart,
-        fields.productsCount,
-        fields.seoTitle,
-        fields.seoDescription,
-        fields.imageUrl,
-        fields.imageAlt,
-        fields.rawShopifyJson,
-        existing.id
-      );
-    }
+    // Always write the scalar fields (they all come from the cheap list query —
+    // no extra API call). This ensures newly added columns like imageUrl
+    // backfill even for collections whose updatedAt hasn't changed since an
+    // earlier sync. `changed` still gates the (expensive) metafield re-fetch.
+    await db.$executeRawUnsafe(
+      `UPDATE \`Collection\` SET
+         handle = ?, title = ?, bodyHtml = ?, sortOrder = ?, templateSuffix = ?,
+         isSmart = ?, productsCount = ?, seoTitle = ?, seoDescription = ?,
+         imageUrl = ?, imageAlt = ?, rawShopifyJson = ?, updatedAt = NOW(3)
+       WHERE id = ?`,
+      fields.handle,
+      fields.title,
+      fields.bodyHtml,
+      fields.sortOrder,
+      fields.templateSuffix,
+      fields.isSmart,
+      fields.productsCount,
+      fields.seoTitle,
+      fields.seoDescription,
+      fields.imageUrl,
+      fields.imageAlt,
+      fields.rawShopifyJson,
+      existing.id
+    );
     return { id: existing.id, changed };
   }
 
