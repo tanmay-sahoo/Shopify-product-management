@@ -51,6 +51,7 @@ export async function POST(request: NextRequest) {
         0
       ),
       errors: parsed.errors,
+      warnings: parsed.warnings,
       products: parsed.products
     }
   });

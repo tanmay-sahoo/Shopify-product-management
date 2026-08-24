@@ -7,6 +7,12 @@ export type ParsedMetafield = {
   type: string;
   value: string;
   ref?: string;
+  // Set when the value came from a reference metafield's [display] column and
+  // there was no value/[ref] column to resolve from (e.g. custom.color = "Rot").
+  // The push step looks up the metafield's real type in the destination shop
+  // and resolves each label to a metaobject GID by display name (creating the
+  // metaobject if it doesn't exist). `type` is empty until then.
+  byDisplayName?: boolean;
 };
 
 export type ParsedVariant = {
@@ -74,6 +80,10 @@ export type ParsedProduct = {
 export type ParseResult = {
   products: ParsedProduct[];
   errors: Array<{ row: number; message: string }>;
+  // Non-fatal advisories — the import still runs, but some data was reshaped
+  // (bare list values wrapped as JSON) or can't be imported (reference
+  // metafields that only carry a [display] column). Row 0 = whole-file scope.
+  warnings: Array<{ row: number; message: string }>;
 };
 
 function splitCsvLine(line: string): string[] {
@@ -131,6 +141,49 @@ export function parseCsvRaw(text: string): { headers: string[]; rows: string[][]
 
 const METAFIELD_HEADER = /^\s*(Product|Variant)\s+Metafield:\s*(.+?)\.(.+?)\s*\[(.+?)\]\s*$/i;
 const REF_SUFFIX = /^(display|ref)$/i;
+
+// Reference-backed metafield types resolve their value from the companion
+// [ref] column (portable keys), so their raw cell text is never sent to
+// Shopify as-is — list normalization must leave them untouched.
+const REFERENCE_TYPE_RE = /^(list\.)?(metaobject|product|variant|collection|file|page)_reference$/i;
+
+// Shopify's `list.*` metafields expect the value to be a JSON-encoded array
+// string (e.g. `["Stoff"]`), but native Shopify/Matrixify exports often write
+// the bare scalar or a comma-separated list ("Stoff" / "Blau, Gelb"). Wrap
+// those into the JSON array Shopify requires. Already-JSON arrays and
+// reference-backed lists (resolved via [ref]) pass through unchanged.
+function normalizeListValue(type: string, value: string): string {
+  if (!/^list\./i.test(type) || REFERENCE_TYPE_RE.test(type)) return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  if (trimmed.startsWith("[")) {
+    try {
+      if (Array.isArray(JSON.parse(trimmed))) return trimmed;
+    } catch {
+      // Not valid JSON despite the leading "[" — fall through and treat as scalar.
+    }
+  }
+  // A single cell can hold several list items either comma-separated
+  // ("Blau, Gelb") or, when authored in Excel/Sheets, one per line. When the
+  // cell spans multiple lines, newlines are the delimiter — splitting on commas
+  // instead would leave the embedded line breaks inside each item, which
+  // Shopify rejects for text lists ("Value must be a single line text string").
+  // Comma-splitting stays the default so values that legitimately contain a
+  // comma survive when the author used one value per line.
+  const hasNewline = /[\r\n]/.test(trimmed);
+  const items = trimmed
+    .split(hasNewline ? /[\r\n]+/ : ",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (items.length === 0) return value;
+  if (/^list\.(number_integer|number_decimal)$/i.test(type) && items.every((i) => /^-?\d+(\.\d+)?$/.test(i))) {
+    return JSON.stringify(items.map(Number));
+  }
+  if (/^list\.boolean$/i.test(type)) {
+    return JSON.stringify(items.map((i) => /^(true|yes|1)$/i.test(i)));
+  }
+  return JSON.stringify(items);
+}
 
 function emptyProduct(handle: string): ParsedProduct {
   return {
@@ -208,14 +261,15 @@ function normalizeShopifyId(value: string): string {
 export function parseShopifyCsv(text: string): ParseResult {
   const { headers, rows } = parseCsvRaw(text);
   const errors: ParseResult["errors"] = [];
+  const warnings: ParseResult["warnings"] = [];
 
   if (headers.length === 0) {
-    return { products: [], errors: [{ row: 0, message: "Empty CSV" }] };
+    return { products: [], errors: [{ row: 0, message: "Empty CSV" }], warnings };
   }
   const hasHandle = headers.some((h) => h.toLowerCase() === "handle");
   const hasId = headers.some((h) => h.toLowerCase() === "id");
   if (!hasHandle && !hasId) {
-    return { products: [], errors: [{ row: 0, message: "Missing required Handle or ID column" }] };
+    return { products: [], errors: [{ row: 0, message: "Missing required Handle or ID column" }], warnings };
   }
 
   const headerIndex = new Map<string, number>();
@@ -230,6 +284,11 @@ export function parseShopifyCsv(text: string): ParseResult {
   const metafieldCols: Array<{ scope: "Product" | "Variant"; namespace: string; key: string; type: string; index: number }> = [];
   // Map of "<scope>|<ns>.<key>" -> column index for the [ref] companion column.
   const refColByKey = new Map<string, number>();
+  // Map of "<scope>|<ns>.<key>" -> [display] column index. Used to detect
+  // reference metafields that arrive display-only (no value column).
+  const displayColByKey = new Map<string, number>();
+  // Metafield keys ("<scope>|<ns>.<key>") that have an importable value column.
+  const valueColKeys = new Set<string>();
   // Discover Image 1..N columns up front (case-insensitive).
   const imageColIndexes: number[] = [];
   headers.forEach((h, i) => {
@@ -239,20 +298,44 @@ export function parseShopifyCsv(text: string): ParseResult {
       const namespace = match[2].trim();
       const key = match[3].trim();
       const typeOrSuffix = match[4].trim();
+      const mfKey = `${scope}|${namespace}.${key}`;
 
       if (REF_SUFFIX.test(typeOrSuffix)) {
         if (typeOrSuffix.toLowerCase() === "ref") {
-          refColByKey.set(`${scope}|${namespace}.${key}`, i);
+          refColByKey.set(mfKey, i);
+        } else {
+          // [display] columns are humans-only; ignore as a value source, but
+          // remember them in case they're the ONLY column present (resolve by name).
+          displayColByKey.set(mfKey, i);
         }
-        // [display] columns are humans-only; ignore on import.
       } else {
         metafieldCols.push({ scope, namespace, key, type: typeOrSuffix, index: i });
+        valueColKeys.add(mfKey);
       }
     }
     if (/^\s*image\s+\d+\s*$/i.test(h)) {
       imageColIndexes.push(i);
     }
   });
+
+  // Reference metafields that arrived display-only (a [display] column with no
+  // matching value column, e.g. custom.color). These can't be resolved from
+  // portable keys, so we carry the display label and resolve it by name at
+  // push time (match an existing metaobject, or create one).
+  const displayOnlyCols: Array<{ scope: "Product" | "Variant"; namespace: string; key: string; index: number }> = [];
+  for (const [mfKey, index] of displayColByKey) {
+    if (valueColKeys.has(mfKey)) continue; // a real value column exists — normal path handles it
+    const sep = mfKey.indexOf("|");
+    const scope = mfKey.slice(0, sep) as "Product" | "Variant";
+    const nsKey = mfKey.slice(sep + 1);
+    const dot = nsKey.indexOf(".");
+    displayOnlyCols.push({
+      scope,
+      namespace: nsKey.slice(0, dot),
+      key: nsKey.slice(dot + 1),
+      index
+    });
+  }
 
   const productsByHandle = new Map<string, ParsedProduct>();
 
@@ -325,8 +408,21 @@ export function parseShopifyCsv(text: string): ParseResult {
             namespace: col.namespace,
             key: col.key,
             type: col.type,
-            value,
+            value: normalizeListValue(col.type, value),
             ref: ref || undefined
+          });
+        }
+      }
+
+      for (const col of displayOnlyCols.filter((c) => c.scope === "Product")) {
+        const value = (row[col.index] ?? "").trim();
+        if (value !== "") {
+          product.metafields.push({
+            namespace: col.namespace,
+            key: col.key,
+            type: "",
+            value,
+            byDisplayName: true
           });
         }
       }
@@ -415,8 +511,26 @@ export function parseShopifyCsv(text: string): ParseResult {
             namespace: col.namespace,
             key: col.key,
             type: col.type,
-            value,
+            value: normalizeListValue(col.type, value),
             ref: ref || undefined
+          };
+          if (existingIdx >= 0) variant.metafields[existingIdx] = next;
+          else variant.metafields.push(next);
+        }
+      }
+
+      for (const col of displayOnlyCols.filter((c) => c.scope === "Variant")) {
+        const value = (row[col.index] ?? "").trim();
+        if (value !== "") {
+          const existingIdx = variant.metafields.findIndex(
+            (m) => m.namespace === col.namespace && m.key === col.key
+          );
+          const next: ParsedMetafield = {
+            namespace: col.namespace,
+            key: col.key,
+            type: "",
+            value,
+            byDisplayName: true
           };
           if (existingIdx >= 0) variant.metafields[existingIdx] = next;
           else variant.metafields.push(next);
@@ -476,5 +590,18 @@ export function parseShopifyCsv(text: string): ParseResult {
     product.images.sort((a, b) => a.position - b.position);
   }
 
-  return { products: Array.from(productsByHandle.values()), errors };
+  // Note (whole-file scope) any reference metafields that arrived display-only
+  // so the user knows these resolve by display name at push time (matched to an
+  // existing metaobject, or created) rather than from portable [ref] keys.
+  const displayOnlyWithData = displayOnlyCols.filter((col) =>
+    rows.some((row) => (row[col.index] ?? "").trim() !== "")
+  );
+  for (const col of displayOnlyWithData) {
+    warnings.push({
+      row: 0,
+      message: `Metafield ${col.namespace}.${col.key} arrived as display text only (no [ref] keys) — it will be matched to metaobjects by display name on push, creating any that don't exist.`
+    });
+  }
+
+  return { products: Array.from(productsByHandle.values()), errors, warnings };
 }

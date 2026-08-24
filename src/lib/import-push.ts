@@ -1227,22 +1227,6 @@ async function pushOneProduct(
   let metafieldsSet = 0;
   const mfInputs: Array<Record<string, unknown>> = [];
 
-  async function buildMfInput(
-    ownerId: string,
-    mf: { namespace: string; key: string; type: string; value: string; ref?: string }
-  ): Promise<Record<string, unknown> | null> {
-    let value = mf.value;
-    if (isReferenceType(mf.type) && mf.ref) {
-      const resolved = await resolver.resolveValue(mf.value, mf.type, mf.ref);
-      if (!resolved) {
-        // Couldn't resolve in destination — skip rather than write a broken GID.
-        return null;
-      }
-      value = resolved;
-    }
-    return { ownerId, namespace: mf.namespace, key: mf.key, type: mf.type, value };
-  }
-
   // Diagnostics: track metafields skipped (unresolvable reference) and failed
   // (rejected by Shopify — most often the reserved `shopify.*` taxonomy
   // namespace, or a missing/mismatched definition) so the result can explain
@@ -1251,8 +1235,50 @@ async function pushOneProduct(
   let metafieldsFailed = 0;
   const mfFailMessages: string[] = [];
 
+  function noteFail(message: string) {
+    if (!mfFailMessages.includes(message)) mfFailMessages.push(message);
+  }
+
+  async function buildMfInput(
+    ownerId: string,
+    ownerType: "PRODUCT" | "PRODUCTVARIANT",
+    mf: { namespace: string; key: string; type: string; value: string; ref?: string; byDisplayName?: boolean }
+  ): Promise<Record<string, unknown> | null> {
+    // Display-only reference metafield (e.g. custom.color = "Rot") — resolve
+    // each label to a metaobject by display name in the destination shop,
+    // creating any that don't exist. `type` is discovered from the definition.
+    if (mf.byDisplayName) {
+      const notes: string[] = [];
+      const resolved = await resolver.resolveByDisplayName(ownerType, mf.namespace, mf.key, mf.value, notes);
+      notes.forEach(noteFail);
+      if (!resolved) return null;
+      return { ownerId, namespace: mf.namespace, key: mf.key, type: resolved.type, value: resolved.value };
+    }
+    let value = mf.value;
+    if (isReferenceType(mf.type)) {
+      // Reference metafields must resolve through the [ref] portable keys.
+      // Without them the cell is (at best) display text like "Rot", which
+      // Shopify would reject — skip rather than write a broken value.
+      if (!mf.ref) return null;
+      const resolved = await resolver.resolveValue(mf.value, mf.type, mf.ref);
+      if (!resolved) {
+        // Couldn't resolve in destination — skip rather than write a broken GID.
+        return null;
+      }
+      value = resolved;
+    }
+    // Shopify rejects `single_line_text_field` values that contain line breaks
+    // ("Value must be a single line text string"). CSV cells often carry stray
+    // \r\n or embedded newlines, so collapse any run of line breaks (and the
+    // surrounding whitespace) into a single space for single-line types.
+    if (mf.type === "single_line_text_field") {
+      value = value.replace(/\s*[\r\n]+\s*/g, " ").trim();
+    }
+    return { ownerId, namespace: mf.namespace, key: mf.key, type: mf.type, value };
+  }
+
   for (const mf of product.metafields) {
-    const input = await buildMfInput(productId, mf);
+    const input = await buildMfInput(productId, "PRODUCT", mf);
     if (input) mfInputs.push(input);
     else metafieldsSkipped++;
   }
@@ -1269,7 +1295,7 @@ async function pushOneProduct(
     const variantGid = matched?.node.id;
     if (!variantGid) continue;
     for (const mf of parsedVariant.metafields) {
-      const input = await buildMfInput(variantGid, mf);
+      const input = await buildMfInput(variantGid, "PRODUCTVARIANT", mf);
       if (input) mfInputs.push(input);
       else metafieldsSkipped++;
     }
@@ -1308,11 +1334,10 @@ async function pushOneProduct(
 
   const mfWarningParts: string[] = [];
   if (metafieldsSkipped > 0) mfWarningParts.push(`${metafieldsSkipped} metafield(s) skipped (unresolved reference)`);
-  if (metafieldsFailed > 0) {
-    mfWarningParts.push(
-      `${metafieldsFailed} metafield(s) failed${mfFailMessages.length ? `: ${mfFailMessages.slice(0, 2).join("; ")}` : ""}`
-    );
-  }
+  if (metafieldsFailed > 0) mfWarningParts.push(`${metafieldsFailed} metafield(s) failed`);
+  // Surface the actual reasons (unmatched labels, creation errors, Shopify
+  // userErrors) whether the metafield was skipped or failed.
+  if (mfFailMessages.length > 0) mfWarningParts.push(mfFailMessages.slice(0, 3).join("; "));
   const metafieldWarning = mfWarningParts.length > 0 ? mfWarningParts.join("; ") : undefined;
 
   // 5. Inventory levels via inventorySetQuantities (per variant with a number).

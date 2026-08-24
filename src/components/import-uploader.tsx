@@ -18,6 +18,7 @@ type ParseResult = {
   totalImages: number;
   totalMetafields: number;
   errors: Array<{ row: number; message: string }>;
+  warnings?: Array<{ row: number; message: string }>;
   products: ParsedProduct[];
 };
 
@@ -349,6 +350,21 @@ export function ImportUploader({ initial: _initial }: { initial: ImportSummary }
               </li>
             ))}
             {parsed.errors.length > 30 ? <li>… and {parsed.errors.length - 30} more</li> : null}
+          </ul>
+        </section>
+      ) : null}
+
+      {parsed && parsed.warnings && parsed.warnings.length > 0 ? (
+        <section className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+          <p className="text-xs font-semibold text-amber-800">Warnings</p>
+          <ul className="mt-2 space-y-1 text-[11px] text-amber-800">
+            {parsed.warnings.slice(0, 30).map((warn, idx) => (
+              <li key={idx}>
+                {warn.row > 0 ? `row ${warn.row}: ` : ""}
+                {warn.message}
+              </li>
+            ))}
+            {parsed.warnings.length > 30 ? <li>… and {parsed.warnings.length - 30} more</li> : null}
           </ul>
         </section>
       ) : null}
