@@ -20,6 +20,265 @@ function isReferenceType(type: string): boolean {
   return REFERENCE_TYPE_RE.test(type);
 }
 
+// --- rich_text_field conversion -------------------------------------------
+// Shopify `rich_text_field` metafields do NOT accept HTML. Their value must be
+// a JSON document following Shopify's rich text schema
+// ({ type: "root", children: [...] }). Content that originates from a
+// description column (or a shop that stored markup) arrives as HTML like
+// "<ul><li>…", which metafieldsSet rejects with "Value is invalid JSON". We
+// convert such HTML into the rich text schema on push; values that are already
+// valid rich text JSON pass through untouched.
+
+type RichNode = Record<string, unknown>;
+type HtmlEl = { tag: string; attrs: Record<string, string>; children: Array<HtmlEl | string> };
+type HtmlToken =
+  | { kind: "open"; name: string; attrs: Record<string, string> }
+  | { kind: "close"; name: string }
+  | { kind: "text"; value: string };
+
+const VOID_TAGS = new Set(["br", "img", "hr", "input", "meta", "link", "wbr"]);
+const BLOCK_TAGS = new Set([
+  "p", "div", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+  "section", "article", "blockquote", "table", "header", "footer",
+]);
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+};
+
+function decodeEntities(text: string): string {
+  return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, code: string) => {
+    if (code[0] === "#") {
+      const cp = code[1] === "x" || code[1] === "X"
+        ? parseInt(code.slice(2), 16)
+        : parseInt(code.slice(1), 10);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+    }
+    return NAMED_ENTITIES[code.toLowerCase()] ?? m;
+  });
+}
+
+function parseAttrs(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|(\S+))/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw))) {
+    attrs[m[1].toLowerCase()] = decodeEntities(m[3] ?? m[4] ?? m[5] ?? "");
+  }
+  return attrs;
+}
+
+function tokenizeHtml(html: string): HtmlToken[] {
+  const tokens: HtmlToken[] = [];
+  const re = /<\/?([a-zA-Z][a-zA-Z0-9]*)((?:[^>"']|"[^"]*"|'[^']*')*)\/?>/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    if (m.index > last) tokens.push({ kind: "text", value: html.slice(last, m.index) });
+    const name = m[1].toLowerCase();
+    if (m[0][1] === "/") tokens.push({ kind: "close", name });
+    else tokens.push({ kind: "open", name, attrs: parseAttrs(m[2] || "") });
+    last = re.lastIndex;
+  }
+  if (last < html.length) tokens.push({ kind: "text", value: html.slice(last) });
+  return tokens;
+}
+
+function buildHtmlTree(html: string): Array<HtmlEl | string> {
+  const root: HtmlEl = { tag: "#root", attrs: {}, children: [] };
+  const stack: HtmlEl[] = [root];
+  for (const t of tokenizeHtml(html)) {
+    const top = stack[stack.length - 1];
+    if (t.kind === "text") {
+      top.children.push(t.value);
+    } else if (t.kind === "open") {
+      const el: HtmlEl = { tag: t.name, attrs: t.attrs, children: [] };
+      top.children.push(el);
+      if (!VOID_TAGS.has(t.name)) stack.push(el);
+    } else {
+      // Pop back to the matching open tag, tolerating unclosed inline elements.
+      for (let i = stack.length - 1; i >= 1; i--) {
+        if (stack[i].tag === t.name) {
+          stack.length = i;
+          break;
+        }
+      }
+    }
+  }
+  return root.children;
+}
+
+type InlineStyle = { bold?: boolean; italic?: boolean };
+function styleProps(style: InlineStyle): RichNode {
+  const p: RichNode = {};
+  if (style.bold) p.bold = true;
+  if (style.italic) p.italic = true;
+  return p;
+}
+
+function inlineText(raw: string, style: InlineStyle): RichNode[] {
+  const text = decodeEntities(raw).replace(/\s+/g, " ");
+  if (!text) return [];
+  return [{ type: "text", value: text, ...styleProps(style) }];
+}
+
+function collectInline(nodes: Array<HtmlEl | string>, style: InlineStyle): RichNode[] {
+  const out: RichNode[] = [];
+  for (const n of nodes) {
+    if (typeof n === "string") {
+      out.push(...inlineText(n, style));
+    } else if (n.tag === "br") {
+      out.push({ type: "text", value: "\n", ...styleProps(style) });
+    } else if (n.tag === "strong" || n.tag === "b") {
+      out.push(...collectInline(n.children, { ...style, bold: true }));
+    } else if (n.tag === "em" || n.tag === "i") {
+      out.push(...collectInline(n.children, { ...style, italic: true }));
+    } else if (n.tag === "a") {
+      const url = n.attrs.href || "";
+      const linkChildren = collectInline(n.children, style).filter((c) => c.type === "text");
+      out.push({
+        type: "link",
+        url,
+        title: n.attrs.title || "",
+        target: n.attrs.target || "",
+        children: linkChildren.length ? linkChildren : [{ type: "text", value: url }],
+      });
+    } else {
+      // span or any other inline wrapper: descend, keep current style.
+      out.push(...collectInline(n.children, style));
+    }
+  }
+  return out;
+}
+
+function trimInline(nodes: RichNode[]): RichNode[] {
+  const arr = nodes.slice();
+  while (arr.length && arr[0].type === "text") {
+    const v = String(arr[0].value).replace(/^\s+/, "");
+    if (v === "") { arr.shift(); continue; }
+    arr[0] = { ...arr[0], value: v };
+    break;
+  }
+  while (arr.length && arr[arr.length - 1].type === "text") {
+    const i = arr.length - 1;
+    const v = String(arr[i].value).replace(/\s+$/, "");
+    if (v === "") { arr.pop(); continue; }
+    arr[i] = { ...arr[i], value: v };
+    break;
+  }
+  return arr;
+}
+
+function hasBlockChild(n: HtmlEl): boolean {
+  return n.children.some((c) => typeof c !== "string" && BLOCK_TAGS.has(c.tag));
+}
+
+function buildListItemChildren(li: HtmlEl): RichNode[] {
+  const out: RichNode[] = [];
+  let buf: RichNode[] = [];
+  const flush = () => {
+    const t = trimInline(buf);
+    buf = [];
+    return t;
+  };
+  for (const c of li.children) {
+    if (typeof c === "string") { buf.push(...inlineText(c, {})); continue; }
+    if (c.tag === "ul" || c.tag === "ol") {
+      out.push(...flush());
+      out.push(buildList(c));
+    } else if (c.tag === "p" || c.tag === "div") {
+      out.push(...flush());
+      out.push(...trimInline(collectInline(c.children, {})));
+    } else {
+      buf.push(...collectInline([c], {}));
+    }
+  }
+  out.push(...flush());
+  return out.length ? out : [{ type: "text", value: "" }];
+}
+
+function buildList(n: HtmlEl): RichNode {
+  const listType = n.tag === "ol" ? "ordered" : "unordered";
+  const items: RichNode[] = [];
+  for (const c of n.children) {
+    if (typeof c === "string") continue;
+    if (c.tag === "li") {
+      items.push({ type: "list-item", children: buildListItemChildren(c) });
+    } else if (c.tag === "ul" || c.tag === "ol") {
+      // Nested list not wrapped in an <li>: attach to the previous item, or
+      // start a new one so the content is not lost.
+      const nested = buildList(c);
+      const prev = items[items.length - 1];
+      if (prev) (prev.children as RichNode[]).push(nested);
+      else items.push({ type: "list-item", children: [nested] });
+    }
+  }
+  return { type: "list", listType, children: items };
+}
+
+function collectBlocks(nodes: Array<HtmlEl | string>, out: RichNode[]): void {
+  let buf: RichNode[] = [];
+  const flush = () => {
+    if (!buf.length) return;
+    const trimmed = trimInline(buf);
+    buf = [];
+    if (trimmed.length) out.push({ type: "paragraph", children: trimmed });
+  };
+  for (const n of nodes) {
+    if (typeof n === "string") {
+      buf.push(...inlineText(n, {}));
+      continue;
+    }
+    const tag = n.tag;
+    if (tag === "br") {
+      buf.push({ type: "text", value: "\n" });
+    } else if (tag === "p" || tag === "div") {
+      flush();
+      if (hasBlockChild(n)) {
+        collectBlocks(n.children, out);
+      } else {
+        const inline = trimInline(collectInline(n.children, {}));
+        out.push({ type: "paragraph", children: inline.length ? inline : [{ type: "text", value: "" }] });
+      }
+    } else if (/^h[1-6]$/.test(tag)) {
+      flush();
+      const inline = trimInline(collectInline(n.children, {}));
+      out.push({ type: "heading", level: Number(tag[1]), children: inline.length ? inline : [{ type: "text", value: "" }] });
+    } else if (tag === "ul" || tag === "ol") {
+      flush();
+      out.push(buildList(n));
+    } else if (tag === "li") {
+      flush();
+      out.push({ type: "paragraph", children: buildListItemChildren(n) });
+    } else if (hasBlockChild(n)) {
+      flush();
+      collectBlocks(n.children, out);
+    } else {
+      buf.push(...collectInline([n], {}));
+    }
+  }
+  flush();
+}
+
+function htmlToRichText(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) return JSON.stringify({ type: "root", children: [] });
+  // Already a rich text document? Leave it exactly as-is.
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && (parsed as RichNode).type === "root") {
+      return trimmed;
+    }
+  } catch {
+    // Not JSON — fall through and treat as HTML / plain text.
+  }
+  const blocks: RichNode[] = [];
+  collectBlocks(buildHtmlTree(trimmed), blocks);
+  if (!blocks.length) {
+    blocks.push({ type: "paragraph", children: [{ type: "text", value: decodeEntities(trimmed) }] });
+  }
+  return JSON.stringify({ type: "root", children: blocks });
+}
+
 export type PushOutcome = {
   handle: string;
   ok: boolean;
@@ -212,6 +471,25 @@ function filenameOf(url: string): string {
   } catch {
     const last = url.split("/").pop() ?? "";
     return last.split("?")[0].toLowerCase();
+  }
+}
+
+// Shopify downloads media from `originalSource` itself. URLs that carry raw
+// (un-percent-encoded) non-ASCII characters or spaces get mangled on the way —
+// an http->https redirect can re-encode "ä" as Latin-1 (%e4) instead of UTF-8
+// (%c3%a4), which 404s and surfaces as "Media processing failed". Running the
+// URL through the WHATWG parser percent-encodes each path segment as UTF-8, and
+// upgrading to https avoids depending on a redirect that may re-encode wrongly.
+function normalizeMediaUrl(raw: string): string {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return "";
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol === "http:") u.protocol = "https:";
+    return u.toString();
+  } catch {
+    // Not an absolute URL (e.g. a bare path) — leave it untouched.
+    return trimmed;
   }
 }
 
@@ -1048,7 +1326,7 @@ async function pushOneProduct(
   const orderedUrls: string[] = [];
   const altTextByUrl = new Map<string, string>();
   for (const img of product.images) {
-    const src = (img.src ?? "").trim();
+    const src = normalizeMediaUrl(img.src ?? "");
     if (!src) continue;
     if (!altTextByUrl.has(src)) {
       orderedUrls.push(src);
@@ -1056,7 +1334,7 @@ async function pushOneProduct(
     }
   }
   for (const variant of product.variants) {
-    const url = (variant.variantImage ?? "").trim();
+    const url = normalizeMediaUrl(variant.variantImage ?? "");
     if (!url) continue;
     if (!altTextByUrl.has(url)) {
       orderedUrls.push(url);
@@ -1125,7 +1403,8 @@ async function pushOneProduct(
   // by index if the exact URL isn't in the lookup map.
   const productImageUrlToIndex = new Map<string, number>();
   product.images.forEach((img, idx) => {
-    if (img.src) productImageUrlToIndex.set(img.src.trim(), idx);
+    const src = normalizeMediaUrl(img.src ?? "");
+    if (src) productImageUrlToIndex.set(src, idx);
   });
   const uploadedMediaIdsInOrder: string[] = orderedUrls
     .map((url) => mediaIdBySourceUrl.get(url))
@@ -1135,7 +1414,7 @@ async function pushOneProduct(
   const variantMediaAssignments: Array<{ variantId: string; mediaIds: string[] }> = [];
   let variantImagesUnmatched = 0;
   dedupedForAttach.forEach((parsedVariant, idx) => {
-    const url = (parsedVariant.variantImage ?? "").trim();
+    const url = normalizeMediaUrl(parsedVariant.variantImage ?? "");
     if (!url) return;
     let mediaId = mediaIdBySourceUrl.get(url);
     if (!mediaId) {
@@ -1273,6 +1552,11 @@ async function pushOneProduct(
     // surrounding whitespace) into a single space for single-line types.
     if (mf.type === "single_line_text_field") {
       value = value.replace(/\s*[\r\n]+\s*/g, " ").trim();
+    }
+    // rich_text_field wants a JSON rich-text document, not HTML. Convert markup
+    // (or plain text) into Shopify's schema; already-valid JSON passes through.
+    if (mf.type === "rich_text_field") {
+      value = htmlToRichText(value);
     }
     return { ownerId, namespace: mf.namespace, key: mf.key, type: mf.type, value };
   }
