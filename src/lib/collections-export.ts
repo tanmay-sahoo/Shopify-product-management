@@ -4,6 +4,11 @@
 // columns discovered across the whole export, and `[display]`/`[ref]` companion
 // columns for reference-type metafields so they survive a round-trip.
 
+import {
+  formatCollectionRules,
+  formatRulesMatch,
+  type CollectionRuleSet
+} from "@/lib/collection-rules";
 import type { ExportMetafield } from "@/lib/export";
 
 export type ExportCollection = {
@@ -15,6 +20,8 @@ export type ExportCollection = {
   sortOrder: string;
   templateSuffix: string;
   isSmart: boolean;
+  // Smart-collection conditions, or null for a manual collection.
+  ruleSet: CollectionRuleSet | null;
   seoTitle: string;
   seoDescription: string;
   imageSrc: string;
@@ -38,6 +45,8 @@ const STANDARD_COLUMNS = [
   "Sort Order",
   "Template Suffix",
   "Type",
+  "Rules Match",
+  "Rules",
   "SEO Title",
   "SEO Description",
   "Image Src",
@@ -157,6 +166,8 @@ export function toCollectionsCsv(
     row["Sort Order"] = collection.sortOrder;
     row["Template Suffix"] = collection.templateSuffix;
     row.Type = collection.isSmart ? "Smart" : "Custom";
+    row["Rules Match"] = formatRulesMatch(collection.ruleSet);
+    row.Rules = formatCollectionRules(collection.ruleSet);
     row["SEO Title"] = collection.seoTitle;
     row["SEO Description"] = collection.seoDescription;
     row["Image Src"] = collection.imageSrc;

@@ -1,9 +1,11 @@
 // Parses a collections CSV for bulk partial-update. Keyed by Collection ID
 // (one row per collection). Mirrors the product parser's partial-update rule:
 // a field is only carried when its column exists AND the cell is non-empty —
-// an empty cell means "leave alone", never "clear". Smart-collection rules are
-// never represented here, so they can never be touched.
+// an empty cell means "leave alone", never "clear". That holds for the
+// smart-collection rules too: an empty "Rules" cell never clears the rules a
+// collection already has.
 
+import { parseCollectionRules, parseRulesMatch, type CollectionRule } from "@/lib/collection-rules";
 import { parseCsvRaw, type ParsedMetafield } from "@/lib/import-parser";
 
 export type ParsedCollection = {
@@ -25,6 +27,12 @@ export type ParsedCollection = {
   seoDescription?: string;
   imageSrc?: string;
   imageAlt?: string;
+  // Smart-collection conditions. undefined when the "Rules" cell was absent or
+  // empty, so the push leaves the collection's existing rules alone.
+  rules?: CollectionRule[];
+  // From "Rules Match": false = all conditions, true = any. Undefined falls
+  // back to "all" when rules are being written.
+  rulesAppliedDisjunctively?: boolean;
   metafields: ParsedMetafield[];
 };
 
@@ -150,6 +158,32 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       });
     }
 
+    // Smart-collection rules. A malformed cell fails the row rather than
+    // writing a half-understood rule set into Shopify.
+    let rules: CollectionRule[] | undefined;
+    const rulesCell = optional(row, "Rules");
+    if (rulesCell !== undefined) {
+      const parsed = parseCollectionRules(rulesCell);
+      if (parsed.errors.length > 0) {
+        errors.push({ row: rowNumber, message: `Rules: ${parsed.errors.join("; ")} (row skipped)` });
+        return;
+      }
+      if (parsed.rules.length > 0) rules = parsed.rules;
+    }
+
+    const rulesMatchCell = optional(row, "Rules Match");
+    let rulesAppliedDisjunctively: boolean | undefined;
+    if (rulesMatchCell !== undefined) {
+      rulesAppliedDisjunctively = parseRulesMatch(rulesMatchCell);
+      if (rulesAppliedDisjunctively === undefined) {
+        errors.push({
+          row: rowNumber,
+          message: `Rules Match "${rulesMatchCell}" must be "all" or "any" (row skipped)`
+        });
+        return;
+      }
+    }
+
     const collection: ParsedCollection = {
       rowNumber,
       id: normalizedId,
@@ -163,6 +197,8 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       seoDescription: optional(row, "SEO Description"),
       imageSrc: optional(row, "Image Src", "Image"),
       imageAlt: optional(row, "Image Alt"),
+      rules,
+      rulesAppliedDisjunctively,
       metafields
     };
 
@@ -177,6 +213,7 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       collection.seoTitle !== undefined ||
       collection.seoDescription !== undefined ||
       collection.imageSrc !== undefined ||
+      collection.rules !== undefined ||
       metafields.length > 0;
     if (!hasAnyField) {
       errors.push({

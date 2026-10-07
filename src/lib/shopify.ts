@@ -223,7 +223,18 @@ export const COLLECTIONS_SYNC_QUERY = `
           productsCount { count }
           ruleSet {
             appliedDisjunctively
-            rules { column relation condition }
+            rules {
+              column
+              relation
+              condition
+              # Metafield-definition rules carry the definition here — the
+              # condition alone doesn't say which metafield it compares.
+              conditionObject {
+                ... on CollectionRuleMetafieldCondition {
+                  metafieldDefinition { id namespace key ownerType }
+                }
+              }
+            }
           }
         }
       }

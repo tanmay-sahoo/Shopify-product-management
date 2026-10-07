@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { readActiveStoreId } from "@/lib/active-store";
+import { ruleSetFromRawJson } from "@/lib/collection-rules";
 import { toCollectionsCsv, type ExportCollection } from "@/lib/collections-export";
 import { csvResponse } from "@/lib/csv-response";
 import { extractGidsFromValue, isReferenceType, resolveGidsRich } from "@/lib/export-references";
@@ -23,6 +24,8 @@ type CollectionRow = {
   seoDescription: string | null;
   imageUrl: string | null;
   imageAlt: string | null;
+  // MySQL JSON column — Prisma returns it already parsed as an object.
+  rawShopifyJson: unknown;
 };
 
 type MetafieldRow = {
@@ -74,7 +77,7 @@ async function exportCollectionsCsv() {
 
   const rows = await prisma.$queryRaw<CollectionRow[]>(
     Prisma.sql`SELECT id, shopifyCollectionId, handle, title, bodyHtml, sortOrder, templateSuffix,
-                      isSmart, seoTitle, seoDescription, imageUrl, imageAlt
+                      isSmart, seoTitle, seoDescription, imageUrl, imageAlt, rawShopifyJson
                FROM \`Collection\`
                WHERE storeId = ${store.id}
                ORDER BY title ASC`
@@ -90,6 +93,7 @@ async function exportCollectionsCsv() {
     sortOrder: row.sortOrder ?? "",
     templateSuffix: row.templateSuffix ?? "",
     isSmart: Boolean(Number(row.isSmart ?? 0)),
+    ruleSet: ruleSetFromRawJson(row.rawShopifyJson),
     seoTitle: row.seoTitle ?? "",
     seoDescription: row.seoDescription ?? "",
     imageSrc: row.imageUrl ?? "",

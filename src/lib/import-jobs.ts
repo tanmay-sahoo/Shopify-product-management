@@ -372,6 +372,17 @@ async function pushCollectionsImport(importId: bigint, storeId: bigint) {
   const failed = result.totals.failed;
   const ok = result.totals.ok;
   const finalStatus: ImportJobStatus = failed === 0 ? "completed" : ok === 0 ? "failed" : "completed";
+
+  // Rows can succeed and still not have applied everything (smart-collection
+  // rules Shopify refused, unresolved metafield references). Those warnings
+  // used to live only on the row, which made a partial result look like a
+  // clean success — roll them into the job message so the UI shows them.
+  const warnings = result.outcomes.filter((o) => o.ok && o.warning);
+  const warningNote =
+    warnings.length > 0
+      ? ` ${warnings.length} row(s) with warnings: ${warnings[0].warning}${warnings.length > 1 ? " …" : ""}`
+      : "";
+
   await updateImport(importId, {
     status: finalStatus,
     phase: "done",
@@ -380,8 +391,8 @@ async function pushCollectionsImport(importId: bigint, storeId: bigint) {
     error: failed,
     message:
       failed === 0
-        ? `Updated ${ok} collection(s) successfully.`
-        : `Updated ${ok} collection(s). ${failed} failed — download error report for details.`,
+        ? `Updated ${ok} collection(s) successfully.${warningNote}`
+        : `Updated ${ok} collection(s). ${failed} failed — download error report for details.${warningNote}`,
     finished: true
   });
 }

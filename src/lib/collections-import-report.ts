@@ -4,6 +4,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { formatCollectionRules, formatRulesMatch, type CollectionRule } from "@/lib/collection-rules";
 import { getPrismaClient } from "@/lib/prisma";
 import { ensureSchemaCompatibility } from "@/lib/schema-bootstrap";
 
@@ -18,6 +19,8 @@ type StoredCollection = {
   seoDescription?: string;
   imageSrc?: string;
   imageAlt?: string;
+  rules?: CollectionRule[];
+  rulesAppliedDisjunctively?: boolean;
 };
 
 function escape(value: unknown): string {
@@ -35,7 +38,9 @@ const FIELD_HEADERS = [
   "SEO Title",
   "SEO Description",
   "Image Src",
-  "Image Alt"
+  "Image Alt",
+  "Rules Match",
+  "Rules"
 ];
 
 export async function buildCollectionsReportCsv(
@@ -51,7 +56,9 @@ export async function buildCollectionsReportCsv(
                ORDER BY rowNumber ASC`
   );
 
-  const headers = kind === "error" ? ["Error", ...FIELD_HEADERS] : FIELD_HEADERS;
+  // Successful rows can still carry a warning (rules refused, references
+  // skipped) — pushError holds it for ok rows, so give it a column.
+  const headers = kind === "error" ? ["Error", ...FIELD_HEADERS] : ["Warning", ...FIELD_HEADERS];
   const lines: string[] = [headers.map(escape).join(",")];
 
   for (const row of rows) {
@@ -68,9 +75,16 @@ export async function buildCollectionsReportCsv(
       c.seoTitle ?? "",
       c.seoDescription ?? "",
       c.imageSrc ?? "",
-      c.imageAlt ?? ""
+      c.imageAlt ?? "",
+      // Re-emit the rules so a fixed row can be re-uploaded without losing them.
+      c.rules && c.rules.length > 0
+        ? formatRulesMatch({ appliedDisjunctively: Boolean(c.rulesAppliedDisjunctively), rules: c.rules })
+        : "",
+      c.rules && c.rules.length > 0
+        ? formatCollectionRules({ appliedDisjunctively: Boolean(c.rulesAppliedDisjunctively), rules: c.rules })
+        : ""
     ];
-    const values = kind === "error" ? [row.pushError ?? "", ...fields] : fields;
+    const values = [row.pushError ?? "", ...fields];
     lines.push(values.map(escape).join(","));
   }
 

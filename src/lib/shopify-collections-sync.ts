@@ -20,7 +20,14 @@ type MetafieldsConnection = {
 
 type CollectionRuleSet = {
   appliedDisjunctively: boolean;
-  rules: Array<{ column: string; relation: string; condition: string }>;
+  rules: Array<{
+    column: string;
+    relation: string;
+    condition: string;
+    conditionObject?: {
+      metafieldDefinition?: { id: string; namespace: string; key: string; ownerType: string } | null;
+    } | null;
+  }>;
 } | null;
 
 type ShopifyCollectionNode = {

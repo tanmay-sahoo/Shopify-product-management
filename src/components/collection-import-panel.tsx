@@ -245,7 +245,8 @@ export function CollectionImportPanel() {
         <h4 className="mt-4 text-base font-semibold text-ink">Drop a collections CSV here</h4>
         <p className="mt-1 text-sm text-muted">
           Required: <span className="font-mono">ID</span> or <span className="font-mono">Handle</span>. Optional: Title,
-          Body (HTML), Sort Order, Template Suffix, SEO Title/Description, and{" "}
+          Body (HTML), Sort Order, Template Suffix, SEO Title/Description,{" "}
+          <span className="font-mono">Rules</span> / <span className="font-mono">Rules Match</span>, and{" "}
           <span className="font-mono">Collection Metafield: ns.key [type]</span>. For another shop, remove the ID column.
         </p>
         <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
