@@ -8,6 +8,7 @@
 // Best-effort, per-product. Errors are reported back per-product so partial
 // imports still produce useful output.
 
+import { writeMetafields, type MetafieldSetInput } from "@/lib/metafields-write";
 import { decryptValue } from "@/lib/oauth";
 import { getPrismaClient } from "@/lib/prisma";
 import { shopifyGraphQLRequest } from "@/lib/shopify";
@@ -603,14 +604,6 @@ async function waitForMediaReady(
   return ready;
 }
 
-const METAFIELDS_SET = `
-  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      metafields { id }
-      userErrors { field message }
-    }
-  }
-`;
 
 const INVENTORY_SET = `
   mutation InventorySetQuantities($input: InventorySetQuantitiesInput!) {
@@ -1585,35 +1578,13 @@ async function pushOneProduct(
     }
   }
   if (mfInputs.length > 0) {
-    type Resp = {
-      data?: { metafieldsSet?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
-      errors?: Array<{ message: string }>;
-    };
-    // Shopify caps metafieldsSet at 25 per call. metafieldsSet is not atomic —
-    // valid metafields in a call still apply even if siblings error — so we
-    // count per userError rather than failing the whole slice.
-    for (let i = 0; i < mfInputs.length; i += 25) {
-      const slice = mfInputs.slice(i, i + 25);
-      const resp = await shopifyGraphQLRequest<Resp>({
-        shopDomain: auth.shopDomain,
-        accessToken: auth.accessToken,
-        query: METAFIELDS_SET,
-        variables: { metafields: slice }
-      });
-      const topErrors = resp.errors?.map((e) => e.message) ?? [];
-      const userErrors = resp.data?.metafieldsSet?.userErrors ?? [];
-      if (topErrors.length > 0) {
-        metafieldsFailed += slice.length;
-        for (const m of topErrors) if (!mfFailMessages.includes(m)) mfFailMessages.push(m);
-      } else {
-        metafieldsFailed += userErrors.length;
-        metafieldsSet += slice.length - userErrors.length;
-        for (const e of userErrors) {
-          const m = `${(e.field ?? []).join(".")}: ${e.message}`;
-          if (!mfFailMessages.includes(m)) mfFailMessages.push(m);
-        }
-      }
-    }
+    // metafieldsSet is atomic and capped at 25 per call, so writeMetafields
+    // retries a failed batch without the entries Shopify rejected — otherwise
+    // one bad metafield loses every other metafield in its batch.
+    const written = await writeMetafields(auth, mfInputs as MetafieldSetInput[]);
+    metafieldsSet += written.set;
+    metafieldsFailed += written.failed;
+    for (const m of written.messages) if (!mfFailMessages.includes(m)) mfFailMessages.push(m);
   }
 
   const mfWarningParts: string[] = [];

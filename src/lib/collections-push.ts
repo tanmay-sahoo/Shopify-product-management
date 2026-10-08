@@ -16,6 +16,7 @@ import {
   metafieldRuleOwnerType,
   type CollectionRule
 } from "@/lib/collection-rules";
+import { writeMetafields, type MetafieldSetInput } from "@/lib/metafields-write";
 import { decryptValue } from "@/lib/oauth";
 import { getPrismaClient } from "@/lib/prisma";
 import { shopifyGraphQLRequest } from "@/lib/shopify";
@@ -212,14 +213,6 @@ async function findCollectionIdByHandle(auth: ShopAuth, handle: string): Promise
   return null;
 }
 
-const METAFIELDS_SET = `
-  mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-    metafieldsSet(metafields: $metafields) {
-      metafields { id }
-      userErrors { field message }
-    }
-  }
-`;
 
 async function loadShopAuth(storeId: bigint): Promise<ShopAuth | null> {
   const store = await getPrismaClient().store.findUnique({ where: { id: storeId } });
@@ -491,29 +484,12 @@ async function pushOneCollection(
     mfInputs.push({ ownerId: collectionId, namespace: mf.namespace, key: mf.key, type: mf.type, value });
   }
   if (mfInputs.length > 0) {
-    type Resp = {
-      data?: { metafieldsSet?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
-      errors?: Array<{ message: string }>;
-    };
-    for (let i = 0; i < mfInputs.length; i += 25) {
-      const slice = mfInputs.slice(i, i + 25);
-      const resp = await shopifyGraphQLRequest<Resp>({
-        shopDomain: auth.shopDomain,
-        accessToken: auth.accessToken,
-        query: METAFIELDS_SET,
-        variables: { metafields: slice }
-      });
-      const errs = [
-        ...(resp.errors?.map((e) => e.message) ?? []),
-        ...(resp.data?.metafieldsSet?.userErrors?.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`) ?? [])
-      ];
-      if (errs.length === 0) {
-        metafieldsSet += slice.length;
-      } else {
-        metafieldsFailed += slice.length;
-        for (const e of errs) if (!failMessages.includes(e)) failMessages.push(e);
-      }
-    }
+    // Atomic, 25 per call — writeMetafields retries without the entries
+    // Shopify rejected so the rest of the batch still lands.
+    const written = await writeMetafields(auth, mfInputs as MetafieldSetInput[]);
+    metafieldsSet += written.set;
+    metafieldsFailed += written.failed;
+    for (const m of written.messages) if (!failMessages.includes(m)) failMessages.push(m);
   }
 
   // Build a message that surfaces what happened to the metafields, plus a
