@@ -535,10 +535,25 @@ async function fetchVariantMediaMap(
   return out;
 }
 
-async function fetchExistingMediaByFilename(
-  auth: ShopAuth,
-  productId: string
-): Promise<Map<string, string>> {
+// Shopify renames an uploaded file when that name is already taken in Files,
+// appending a fresh UUID before the extension. So the same source image lands
+// under a different name in every shop (and on every product), and comparing
+// raw filenames never matches:
+//
+//   CSV  …_20hp_20_1_63ca8273-3f35-41d7-8314-1743e3aadfd1.webp
+//   shop …_20hp_20_1_c3412b08-fa1d-45aa-ae16-6bfa38c5bb2d.webp
+//
+// Stripping that suffix is what makes a re-import recognise its own images
+// instead of uploading them again.
+const CDN_UUID_SUFFIX = /_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\.[^.]*$)/i;
+
+function mediaMatchKey(urlOrName: string): string {
+  return filenameOf(urlOrName).replace(CDN_UUID_SUFFIX, "");
+}
+
+type ExistingMedia = { id: string; name: string };
+
+async function fetchExistingMedia(auth: ShopAuth, productId: string): Promise<ExistingMedia[]> {
   type Resp = {
     data?: {
       product?: {
@@ -549,7 +564,7 @@ async function fetchExistingMediaByFilename(
     };
     errors?: Array<{ message: string }>;
   };
-  const out = new Map<string, string>();
+  const out: ExistingMedia[] = [];
   try {
     const resp = await shopifyGraphQLRequest<Resp>({
       shopDomain: auth.shopDomain,
@@ -558,9 +573,8 @@ async function fetchExistingMediaByFilename(
       variables: { id: productId }
     });
     for (const edge of resp.data?.product?.media?.edges ?? []) {
-      const url = edge.node.image?.url ?? "";
-      const name = filenameOf(url);
-      if (name && !out.has(name)) out.set(name, edge.node.id);
+      const name = filenameOf(edge.node.image?.url ?? "");
+      if (name) out.push({ id: edge.node.id, name });
     }
   } catch {
     // best-effort — on failure we just skip dedupe (old behavior).
@@ -1317,6 +1331,7 @@ async function pushOneProduct(
   //    and capture the resulting MediaImage GIDs so step 3b can attach each
   //    variant's image to its variant.
   let imagesCreated = 0;
+  let imagesReused = 0;
   const mediaIdBySourceUrl = new Map<string, string>();
   const orderedUrls: string[] = [];
   const altTextByUrl = new Map<string, string>();
@@ -1343,12 +1358,39 @@ async function pushOneProduct(
     // Shopify CDN preserves the original filename, so a re-uploaded export
     // dedupes cleanly. Brand-new URLs the operator added in the CSV get
     // uploaded as new media — that's how round-trip image edits work.
-    const existingByFilename = await fetchExistingMediaByFilename(auth, productId);
+    const existingMedia = await fetchExistingMedia(auth, productId);
+
+    // Each existing media can satisfy at most one CSV row, so two CSV images
+    // that normalize to the same key don't both collapse onto it. Exact
+    // filename wins over the UUID-stripped key.
+    const claimed = new Set<string>();
+    const byExactName = new Map<string, ExistingMedia[]>();
+    const byKey = new Map<string, ExistingMedia[]>();
+    for (const media of existingMedia) {
+      const exact = byExactName.get(media.name) ?? [];
+      exact.push(media);
+      byExactName.set(media.name, exact);
+      const key = mediaMatchKey(media.name);
+      const keyed = byKey.get(key) ?? [];
+      keyed.push(media);
+      byKey.set(key, keyed);
+    }
+    const claim = (index: Map<string, ExistingMedia[]>, lookup: string): ExistingMedia | null => {
+      for (const media of index.get(lookup) ?? []) {
+        if (!claimed.has(media.id)) {
+          claimed.add(media.id);
+          return media;
+        }
+      }
+      return null;
+    };
+
     const urlsToUpload: string[] = [];
     for (const url of orderedUrls) {
-      const existingId = existingByFilename.get(filenameOf(url));
-      if (existingId) {
-        mediaIdBySourceUrl.set(url, existingId);
+      const match = claim(byExactName, filenameOf(url)) ?? claim(byKey, mediaMatchKey(url));
+      if (match) {
+        imagesReused++;
+        mediaIdBySourceUrl.set(url, match.id);
       } else {
         urlsToUpload.push(url);
       }
@@ -1387,10 +1429,12 @@ async function pushOneProduct(
       const returned = resp.data?.productCreateMedia?.media ?? [];
       mediaInputs.forEach((input, idx) => {
         const node = returned[idx];
-        if (node?.id) mediaIdBySourceUrl.set(input.originalSource, node.id);
+        if (node?.id) {
+          mediaIdBySourceUrl.set(input.originalSource, node.id);
+          imagesCreated++;
+        }
       });
     }
-    imagesCreated = mediaIdBySourceUrl.size;
   }
 
   // 3b. Variant images — attach the uploaded media to the right variant.
@@ -1706,7 +1750,7 @@ async function pushOneProduct(
   return {
     handle: product.handle,
     ok: true,
-    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}${smartSkipped > 0 ? `, ${smartSkipped} smart collection(s) left to their rules` : ""}`,
+    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s) uploaded${imagesReused > 0 ? `, ${imagesReused} reused` : ""}, ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}${smartSkipped > 0 ? `, ${smartSkipped} smart collection(s) left to their rules` : ""}`,
     warning: [metafieldWarning, ...collectionNotes].filter(Boolean).join("; ") || undefined,
     productId,
     variantsCreated: dedupedForAttach.length,
