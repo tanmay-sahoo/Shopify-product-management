@@ -441,6 +441,15 @@ export function startImportPush(importId: bigint, storeId: bigint) {
       const failed = result.totals.failed;
       const ok = result.totals.ok;
       const finalStatus: ImportJobStatus = failed === 0 ? "completed" : ok === 0 ? "failed" : "completed";
+
+      // Collections the run had to create for the Collections column are worth
+      // naming — they are new objects in the shop, and manual ones at that.
+      const made = result.collectionsCreated ?? [];
+      const madeNote =
+        made.length > 0
+          ? ` Created ${made.length} collection(s): ${made.map((c) => c.handle).slice(0, 5).join(", ")}${made.length > 5 ? " …" : ""}.`
+          : "";
+
       await updateImport(importId, {
         status: finalStatus,
         phase: "done",
@@ -449,8 +458,8 @@ export function startImportPush(importId: bigint, storeId: bigint) {
         error: failed,
         message:
           failed === 0
-            ? `Pushed ${ok} product(s) successfully.`
-            : `Pushed ${ok} product(s). ${failed} failed — download error report for details.`,
+            ? `Pushed ${ok} product(s) successfully.${madeNote}`
+            : `Pushed ${ok} product(s). ${failed} failed — download error report for details.${madeNote}`,
         finished: true
       });
     } catch (error) {

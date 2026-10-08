@@ -267,6 +267,15 @@ export class DestinationResolver {
 
   constructor(private auth: Auth) {}
 
+  /**
+   * Primes the cache with a GID the caller just created, so a resource created
+   * for one row is reused by the next instead of being looked up (and missed —
+   * `resolve` caches nulls) again.
+   */
+  remember(portable: string, gid: string): void {
+    if (portable && gid) this.cache.set(portable, gid);
+  }
+
   async resolve(portable: string): Promise<string | null> {
     if (!portable) return null;
     if (this.cache.has(portable)) return this.cache.get(portable) ?? null;

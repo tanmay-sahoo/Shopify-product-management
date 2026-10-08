@@ -8,6 +8,7 @@
 // Best-effort, per-product. Errors are reported back per-product so partial
 // imports still produce useful output.
 
+import { CollectionTargets } from "@/lib/collection-targets";
 import { writeMetafields, type MetafieldSetInput } from "@/lib/metafields-write";
 import { decryptValue } from "@/lib/oauth";
 import { getPrismaClient } from "@/lib/prisma";
@@ -938,7 +939,8 @@ async function pushOneProduct(
   auth: ShopAuth,
   product: ParsedProduct,
   locationId: string | null,
-  resolver: DestinationResolver
+  resolver: DestinationResolver,
+  collections: CollectionTargets
 ): Promise<PushOutcome> {
   // 1. Resolve product ID (find or create stub). When the CSV row carries an
   // explicit Shopify product ID we trust it — that's how a handle rename works
@@ -1651,16 +1653,31 @@ async function pushOneProduct(
     }
   }
 
-  // 6. Collection membership. Additive — add the product to each listed manual
-  //    collection (by handle). Smart collections are rule-based and reject manual
-  //    adds, so those are skipped. Never removes the product from collections.
+  // 6. Collection membership. Additive — add the product to each listed
+  //    collection by handle, creating the collection (manual) when this shop
+  //    doesn't have it. Smart collections are rule-based: a manual add is
+  //    rejected by Shopify and would be meaningless, so they're counted, not
+  //    forced. Never removes the product from a collection.
   let collectionsAdded = 0;
+  let smartSkipped = 0;
+  const collectionNotes: string[] = [];
   if (product.collections && product.collections.length > 0) {
     for (const handle of product.collections) {
       const trimmed = handle.trim();
       if (!trimmed) continue;
-      const collectionGid = await resolver.resolve(`collection:${trimmed}`);
-      if (!collectionGid) continue; // collection doesn't exist in destination — skip
+
+      const { target, error } = await collections.resolveOrCreate(trimmed);
+      if (!target) {
+        collectionNotes.push(`couldn't create collection "${trimmed}"${error ? `: ${error}` : ""}`);
+        continue;
+      }
+      if (target.smart) {
+        // Its rules decide membership — the product lands there on its own
+        // once it carries the matching tag/field.
+        smartSkipped++;
+        continue;
+      }
+
       try {
         type Resp = {
           data?: { collectionAddProducts?: { userErrors?: Array<{ field: string[] | null; message: string }> } };
@@ -1670,13 +1687,18 @@ async function pushOneProduct(
           shopDomain: auth.shopDomain,
           accessToken: auth.accessToken,
           query: COLLECTION_ADD_PRODUCTS,
-          variables: { id: collectionGid, productIds: [productId] }
+          variables: { id: target.id, productIds: [productId] }
         });
-        if (!resp.errors?.length && !resp.data?.collectionAddProducts?.userErrors?.length) {
-          collectionsAdded++;
-        }
-      } catch {
-        // Smart collection or transient error — skip this membership.
+        const issues = [
+          ...(resp.errors?.map((e) => e.message) ?? []),
+          ...(resp.data?.collectionAddProducts?.userErrors?.map((e) => e.message) ?? [])
+        ];
+        if (issues.length === 0) collectionsAdded++;
+        else collectionNotes.push(`couldn't add to collection "${trimmed}": ${issues[0]}`);
+      } catch (error) {
+        collectionNotes.push(
+          `couldn't add to collection "${trimmed}": ${error instanceof Error ? error.message : "unknown error"}`
+        );
       }
     }
   }
@@ -1684,8 +1706,8 @@ async function pushOneProduct(
   return {
     handle: product.handle,
     ok: true,
-    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}`,
-    warning: metafieldWarning,
+    message: `Pushed ${product.handle}: ${dedupedForAttach.length} variant(s), ${imagesCreated} image(s), ${variantImagesAttached} variant-image link(s), ${metafieldsSet} metafield(s)${collectionsAdded > 0 ? `, ${collectionsAdded} collection(s)` : ""}${smartSkipped > 0 ? `, ${smartSkipped} smart collection(s) left to their rules` : ""}`,
+    warning: [metafieldWarning, ...collectionNotes].filter(Boolean).join("; ") || undefined,
     productId,
     variantsCreated: dedupedForAttach.length,
     imagesCreated,
@@ -1713,6 +1735,8 @@ export async function pushParsedProducts(
 ): Promise<{
   outcomes: PushOutcome[];
   totals: { ok: number; failed: number; cancelled?: boolean };
+  // Collections this run created to hold products, as handle -> derived title.
+  collectionsCreated?: Array<{ handle: string; title: string }>;
 }> {
   const auth = await loadShopAuth(storeId);
   if (!auth) {
@@ -1723,6 +1747,7 @@ export async function pushParsedProducts(
   }
   const locationId = await getPrimaryLocation(auth);
   const resolver = new DestinationResolver(auth);
+  const collectionTargets = new CollectionTargets(auth);
   const outcomes: PushOutcome[] = [];
   let ok = 0;
   let failed = 0;
@@ -1735,7 +1760,7 @@ export async function pushParsedProducts(
     const product = products[i];
     let outcome: PushOutcome;
     try {
-      outcome = await pushOneProduct(auth, product, locationId, resolver);
+      outcome = await pushOneProduct(auth, product, locationId, resolver, collectionTargets);
     } catch (error) {
       outcome = {
         handle: product.handle,
@@ -1752,5 +1777,9 @@ export async function pushParsedProducts(
       // never let progress reporting break the push
     }
   }
-  return { outcomes, totals: { ok, failed, cancelled } };
+  return {
+    outcomes,
+    totals: { ok, failed, cancelled },
+    collectionsCreated: [...collectionTargets.created.entries()].map(([handle, title]) => ({ handle, title }))
+  };
 }
