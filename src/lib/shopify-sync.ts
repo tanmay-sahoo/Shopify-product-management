@@ -83,6 +83,29 @@ export type SyncOptions = {
   onProgress?: (p: SyncProgress) => void | Promise<void>;
 };
 
+const METAFIELD_FETCH_ATTEMPTS = 3;
+
+// Retries a transient failure (a dropped connection, a throttle) before giving
+// up. The caller treats a final failure as "not fetched" rather than "empty",
+// which matters because replaceMetafields deletes what it doesn't replace.
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= METAFIELD_FETCH_ATTEMPTS; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (attempt < METAFIELD_FETCH_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Shopify request failed");
+}
+
+// Throws when the metafields can't be read. It must never return a short list
+// on failure: the caller deletes the owner's stored metafields before inserting
+// what it got back, so a swallowed error would wipe them.
 async function fetchAllMetafields(
   scope: "product" | "variant",
   shopifyOwnerId: string,
@@ -102,23 +125,54 @@ async function fetchAllMetafields(
   let cursor: string | null = null;
   let hasNext = true;
   while (hasNext) {
-    const resp: PageResp = await shopifyGraphQLRequest<PageResp>({
-      shopDomain,
-      accessToken,
-      query,
-      variables: { id: shopifyOwnerId, cursor }
-    });
-    if (resp.errors?.length) break;
-    const conn: MetafieldsConnection | undefined =
-      scope === "product"
+    const conn = await withRetry(async () => {
+      const resp: PageResp = await shopifyGraphQLRequest<PageResp>({
+        shopDomain,
+        accessToken,
+        query,
+        variables: { id: shopifyOwnerId, cursor }
+      });
+      if (resp.errors?.length) {
+        throw new Error(resp.errors.map((error) => error.message).join("; "));
+      }
+      return scope === "product"
         ? resp.data?.product?.metafields
         : resp.data?.productVariant?.metafields;
+    });
+    // No connection means the owner is gone from Shopify (deleted since phase
+    // 1). There is nothing to store; the cleanup phase drops the local row.
     if (!conn) break;
     nodes.push(...conn.edges.map((edge: { node: MetafieldNode }) => edge.node));
     hasNext = conn.pageInfo?.hasNextPage ?? false;
     cursor = conn.pageInfo?.endCursor ?? null;
   }
   return nodes;
+}
+
+// `metafieldsSyncedAt` records that the metafield phase finished for this
+// owner. The sync can't infer that from the owner's Shopify `updatedAt`: phase
+// 1 stores the new updatedAt, so if the run dies before phase 2 reaches this
+// owner, every later sync sees an unchanged updatedAt, skips the fetch, and
+// reports success while the owner has no metafields at all.
+async function loadMetafieldStamps(storeId: bigint, scope: "product" | "variant") {
+  const db = getPrismaClient();
+  const table = scope === "product" ? "Product" : "Variant";
+  const rows = await db.$queryRawUnsafe<{ id: bigint }[]>(
+    `SELECT \`id\` FROM \`${table}\` WHERE \`storeId\` = ? AND \`metafieldsSyncedAt\` IS NOT NULL`,
+    storeId
+  );
+  return new Set(rows.map((row) => String(row.id)));
+}
+
+// Written raw so the sync keeps working against a Prisma client that was
+// generated before this column existed.
+async function setMetafieldStamp(scope: "product" | "variant", ownerId: bigint, synced: boolean) {
+  const db = getPrismaClient();
+  const table = scope === "product" ? "Product" : "Variant";
+  await db.$executeRawUnsafe(
+    `UPDATE \`${table}\` SET \`metafieldsSyncedAt\` = ${synced ? "NOW(3)" : "NULL"} WHERE \`id\` = ?`,
+    ownerId
+  );
 }
 
 async function replaceMetafields(
@@ -236,6 +290,10 @@ export async function syncStoreCatalog(
   };
 
   const pendingMetafieldFetches: PendingMetafieldFetch[] = [];
+  // Owners whose metafields a previous run actually stored. Anything missing
+  // here is queued even when Shopify says the owner hasn't changed.
+  const productStamps = await loadMetafieldStamps(store.id, "product");
+  const variantStamps = await loadMetafieldStamps(store.id, "variant");
   const seenShopifyVariantIdsByProductId = new Map<string, Set<string>>();
   let cursor: string | null = null;
   let hasNextPage = true;
@@ -324,7 +382,7 @@ export async function syncStoreCatalog(
       if (!productRecord) continue;
       const productLocalId = productRecord.id;
 
-      if (!productUnchanged) {
+      if (!productUnchanged || !productStamps.has(String(productLocalId))) {
         pendingMetafieldFetches.push({
           ownerType: "product",
           shopifyOwnerId: productNode.id,
@@ -386,7 +444,7 @@ export async function syncStoreCatalog(
         }
         if (!variantRecord) continue;
 
-        if (!variantUnchanged) {
+        if (!variantUnchanged || !variantStamps.has(String(variantRecord.id))) {
           pendingMetafieldFetches.push({
             ownerType: "variant",
             shopifyOwnerId: variantNode.id,
@@ -446,16 +504,37 @@ export async function syncStoreCatalog(
   });
 
   let mfDone = 0;
+  let mfDeferred = 0;
+  let firstMfError: string | null = null;
   for (const task of pendingMetafieldFetches) {
-    const nodes = await fetchAllMetafields(task.ownerType, task.shopifyOwnerId, store.shopDomain, accessToken);
-    await replaceMetafields(task.ownerType, store.id, task.localOwnerId, nodes);
+    try {
+      const nodes = await fetchAllMetafields(
+        task.ownerType,
+        task.shopifyOwnerId,
+        store.shopDomain,
+        accessToken
+      );
+      await replaceMetafields(task.ownerType, store.id, task.localOwnerId, nodes);
+      await setMetafieldStamp(task.ownerType, task.localOwnerId, true);
+    } catch (error) {
+      // One owner's metafields failing must not abort the rest of the queue,
+      // and must not be mistaken for "this owner has none". Clearing the stamp
+      // leaves it queued for the next sync no matter what updatedAt says.
+      mfDeferred += 1;
+      if (!firstMfError) firstMfError = error instanceof Error ? error.message : "unknown error";
+      try {
+        await setMetafieldStamp(task.ownerType, task.localOwnerId, false);
+      } catch {
+        // best-effort; the owner still has no stamp, so it stays queued
+      }
+    }
     mfDone += 1;
     if (mfDone % 5 === 0 || mfDone === totalMfs) {
       await report({
         phase: "metafields",
         current: mfDone,
         total: totalMfs,
-        message: `Metafields ${mfDone}/${totalMfs}`
+        message: `Metafields ${mfDone}/${totalMfs}${mfDeferred > 0 ? ` (${mfDeferred} deferred)` : ""}`
       });
     }
   }
@@ -494,12 +573,18 @@ export async function syncStoreCatalog(
     data: { lastSyncAt: new Date() }
   });
 
+  const summary =
+    `Synced ${syncedProducts} products, ${syncedVariants} variants, ${syncedCollections} collections.` +
+    (mfDeferred > 0
+      ? ` ${mfDeferred} item(s) had metafields deferred (${firstMfError}) — the next sync retries them.`
+      : "");
+
   await db.syncLog.create({
     data: {
       storeId: store.id,
       jobType: "shopify.initialSync",
-      status: "success",
-      message: `Synced ${syncedProducts} products, ${syncedVariants} variants, ${syncedCollections} collections.`,
+      status: mfDeferred > 0 ? "partial" : "success",
+      message: summary,
       startedAt: new Date(),
       completedAt: new Date()
     }
@@ -509,8 +594,8 @@ export async function syncStoreCatalog(
     phase: "done",
     current: syncedProducts,
     total: syncedProducts,
-    message: `Synced ${syncedProducts} products, ${syncedVariants} variants, ${syncedCollections} collections.`
+    message: summary
   });
 
-  return { syncedProducts, syncedVariants, syncedCollections };
+  return { syncedProducts, syncedVariants, syncedCollections, deferredMetafields: mfDeferred, summary };
 }

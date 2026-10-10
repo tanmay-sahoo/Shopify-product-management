@@ -173,6 +173,7 @@ model Product {
   status           ProductStatus @default(draft)
   seoTitle         String?
   seoDescription   String?     @db.Text
+  metafieldsSyncedAt DateTime? @db.DateTime(3)
   rawShopifyJson   Json?
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
@@ -204,6 +205,7 @@ model Variant {
   inventoryItemId   String?
   weight            Decimal?    @db.Decimal(12, 3)
   weightUnit        String?
+  metafieldsSyncedAt DateTime? @db.DateTime(3)
   rawShopifyJson    Json?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt

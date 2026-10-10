@@ -215,6 +215,34 @@ async function bootstrap() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
+  // Records that phase 2 of the catalog sync (the metafield fetch) actually
+  // completed for this owner. Without it the sync used the owner's Shopify
+  // `updatedAt` alone to decide whether metafields needed re-fetching, so a
+  // sync that died between phase 1 (which stores the new updatedAt) and phase 2
+  // left those owners with no metafields forever: every later sync saw an
+  // unchanged updatedAt, skipped them, and still reported success.
+  //
+  // Backfilled to NOW() for owners that already have metafield rows, so the
+  // first sync after this change repairs exactly the owners that are missing
+  // them instead of re-fetching the whole catalog.
+  for (const [table, metafieldTable, ownerColumn] of [
+    ["Product", "ProductMetafield", "productId"],
+    ["Variant", "VariantMetafield", "variantId"]
+  ] as const) {
+    if (!(await columnExists(table, "metafieldsSyncedAt"))) {
+      await prisma.$executeRawUnsafe(
+        `ALTER TABLE \`${table}\` ADD COLUMN \`metafieldsSyncedAt\` DATETIME(3) NULL`
+      );
+      await prisma.$executeRawUnsafe(
+        `UPDATE \`${table}\` SET \`metafieldsSyncedAt\` = NOW(3)
+         WHERE EXISTS (
+           SELECT 1 FROM \`${metafieldTable}\` m WHERE m.\`${ownerColumn}\` = \`${table}\`.\`id\`
+         )`
+      );
+      console.info(`[schema-bootstrap] added ${table}.metafieldsSyncedAt column`);
+    }
+  }
+
   // Collection image columns (added after the Collection table shipped).
   if (!(await columnExists("Collection", "imageUrl"))) {
     await prisma.$executeRawUnsafe("ALTER TABLE `Collection` ADD COLUMN `imageUrl` TEXT NULL");
