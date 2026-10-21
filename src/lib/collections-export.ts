@@ -47,6 +47,10 @@ const STANDARD_COLUMNS = [
   "Type",
   "Rules Match",
   "Rules",
+  // Always exported blank — it is an instruction to the importer, not state.
+  // Set it to "yes" on a Custom row that should be deleted and recreated as a
+  // Smart collection, which is the only way Shopify will take the conditions.
+  "Replace If Manual",
   "SEO Title",
   "SEO Description",
   "Image Src",

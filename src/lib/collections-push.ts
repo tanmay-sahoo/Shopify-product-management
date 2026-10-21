@@ -16,6 +16,7 @@ import {
   metafieldRuleOwnerType,
   type CollectionRule
 } from "@/lib/collection-rules";
+import { toHandle } from "@/lib/collection-targets";
 import { writeMetafields, type MetafieldSetInput } from "@/lib/metafields-write";
 import { decryptValue } from "@/lib/oauth";
 import { getPrismaClient } from "@/lib/prisma";
@@ -45,17 +46,33 @@ const COLLECTION_CURRENT_QUERY = `
   query CollectionCurrent($id: ID!) {
     collection(id: $id) {
       id
+      handle
+      title
+      descriptionHtml
+      sortOrder
+      templateSuffix
       seo { title description }
+      productsCount { count }
       ruleSet { appliedDisjunctively rules { column } }
     }
   }
 `;
 
 type CurrentCollection = {
+  handle: string;
+  // Carried over when a replace recreates the collection and the CSV row did
+  // not supply these columns, so a recreate never silently loses them.
+  title: string;
+  descriptionHtml: string;
+  sortOrder: string;
+  templateSuffix: string;
   seoTitle: string;
   seoDescription: string;
   // A collection is smart when it has rules; only those accept a new rule set.
   smart: boolean;
+  // Manual membership is lost when a collection is deleted, so a replace is
+  // refused unless the collection is empty.
+  productsCount: number;
 };
 
 /**
@@ -67,7 +84,13 @@ async function loadCurrentCollection(auth: ShopAuth, gid: string): Promise<Curre
   type Resp = {
     data?: {
       collection?: {
+        handle?: string | null;
+        title?: string | null;
+        descriptionHtml?: string | null;
+        sortOrder?: string | null;
+        templateSuffix?: string | null;
         seo?: { title: string | null; description: string | null } | null;
+        productsCount?: { count: number } | null;
         ruleSet?: { rules?: Array<{ column: string }> } | null;
       } | null;
     };
@@ -85,9 +108,15 @@ async function loadCurrentCollection(auth: ShopAuth, gid: string): Promise<Curre
   const node = resp.data?.collection;
   if (!node) return null;
   return {
+    handle: node.handle ?? "",
+    title: node.title ?? "",
+    descriptionHtml: node.descriptionHtml ?? "",
+    sortOrder: node.sortOrder ?? "",
+    templateSuffix: node.templateSuffix ?? "",
     seoTitle: node.seo?.title ?? "",
     seoDescription: node.seo?.description ?? "",
-    smart: Array.isArray(node.ruleSet?.rules) && (node.ruleSet?.rules?.length ?? 0) > 0
+    smart: Array.isArray(node.ruleSet?.rules) && (node.ruleSet?.rules?.length ?? 0) > 0,
+    productsCount: node.productsCount?.count ?? 0
   };
 }
 
@@ -188,6 +217,40 @@ const COLLECTION_CREATE = `
   }
 `;
 
+const COLLECTION_DELETE = `
+  mutation CollectionDelete($input: CollectionDeleteInput!) {
+    collectionDelete(input: $input) {
+      deletedCollectionId
+      userErrors { field message }
+    }
+  }
+`;
+
+/**
+ * Deletes a collection so the row can recreate it as smart. Shopify offers no
+ * manual->smart conversion, so this is the only route for a collection that
+ * already exists. Destructive, hence opt-in per row and refused above.
+ */
+async function deleteCollection(auth: ShopAuth, gid: string): Promise<string | null> {
+  type Resp = {
+    data?: { collectionDelete?: { deletedCollectionId?: string | null; userErrors?: Array<{ field: string[] | null; message: string }> } };
+    errors?: Array<{ message: string }>;
+  };
+  const resp = await shopifyGraphQLRequest<Resp>({
+    shopDomain: auth.shopDomain,
+    accessToken: auth.accessToken,
+    query: COLLECTION_DELETE,
+    variables: { input: { id: gid } }
+  });
+  const issues = [
+    ...(resp.errors?.map((e) => e.message) ?? []),
+    ...(resp.data?.collectionDelete?.userErrors?.map((e) => `${(e.field ?? []).join(".")}: ${e.message}`) ?? [])
+  ];
+  if (issues.length > 0) return issues.join("; ");
+  if (!resp.data?.collectionDelete?.deletedCollectionId) return "collectionDelete returned no id";
+  return null;
+}
+
 const FIND_COLLECTION_BY_HANDLE = `
   query FindCollectionByHandle($q: String!) {
     collections(first: 1, query: $q) {
@@ -208,8 +271,11 @@ async function findCollectionIdByHandle(auth: ShopAuth, handle: string): Promise
     variables: { q: `handle:${handle}` }
   });
   const edge = resp.data?.collections?.edges?.[0];
-  // Guard against a fuzzy match — require the handle to match exactly.
-  if (edge && edge.node.handle === handle) return edge.node.id;
+  // Guard against a fuzzy match, but compare normalised: a CSV cell may be
+  // title-cased ("Aviator") while Shopify stores the handle lowercase. A
+  // strict compare would miss it, fall through to create, and fail with
+  // "Handle has already been taken".
+  if (edge && toHandle(edge.node.handle) === toHandle(handle)) return edge.node.id;
   return null;
 }
 
@@ -305,8 +371,80 @@ async function pushOneCollection(
     );
   }
 
+  // Replace-if-manual: the row carries rules but the target is a manual
+  // collection, which Shopify can never convert to smart. With the row's
+  // opt-in we delete it and fall through to the create path, which is the only
+  // place a rule set can be written. Refused when the collection still holds
+  // products — deleting it would throw that membership away, and nothing here
+  // can put it back.
+  let replaced = false;
+  if (
+    !isCreate &&
+    collection.replaceIfManual &&
+    collection.rules &&
+    collection.rules.length > 0 &&
+    current &&
+    !current.smart
+  ) {
+    if (current.productsCount > 0) {
+      ruleNotes.push(
+        `rules not applied — "${current.handle || label}" is manual and holds ${current.productsCount} ` +
+          "product(s), so it was not replaced (empty it first, or do this one by hand)"
+      );
+    } else {
+      // Resolve the rule set *before* deleting anything. If a metafield
+      // definition is missing, the recreate would come back manual anyway —
+      // and we would have destroyed the collection for nothing.
+      const probe = await buildRuleSetInput(
+        collection.rules,
+        collection.rulesAppliedDisjunctively ?? false,
+        definitions
+      );
+      if (!probe.input) {
+        ruleNotes.push(
+          probe.unresolved.length > 0
+            ? `not replaced — no metafield definition for ${probe.unresolved.join(", ")} in this shop, ` +
+              "so the recreated collection would still be manual"
+            : "not replaced — the rules produced no usable conditions"
+        );
+      } else {
+        // Every field the recreate needs must be read before the delete.
+        const carried = current;
+        const deleteError = await deleteCollection(auth, collectionId);
+        if (deleteError) {
+          return {
+            id: collection.id,
+            title: label,
+            ok: false,
+            message: `Could not delete manual collection "${carried.handle || label}" to recreate it as smart: ${deleteError}`
+          };
+        }
+        // Carry over everything the CSV row did not supply, so the recreated
+        // collection is the old one plus conditions rather than a bare shell.
+        // An empty value read back from Shopify is "not set", not a value to
+        // carry — sending "" as a sortOrder enum would fail the create.
+        const keep = (fromRow: string | undefined, fromShop: string): string | undefined =>
+          fromRow !== undefined ? fromRow : fromShop !== "" ? fromShop : undefined;
+        collection = {
+          ...collection,
+          title: keep(collection.title, carried.title),
+          handle: keep(collection.handle, carried.handle),
+          bodyHtml: keep(collection.bodyHtml, carried.descriptionHtml),
+          sortOrder: keep(collection.sortOrder, carried.sortOrder),
+          templateSuffix: keep(collection.templateSuffix, carried.templateSuffix),
+          seoTitle: keep(collection.seoTitle, carried.seoTitle),
+          seoDescription: keep(collection.seoDescription, carried.seoDescription)
+        };
+        isCreate = true;
+        collectionId = "";
+        current = null;
+        replaced = true;
+      }
+    }
+  }
+
   // 1. Create or update the collection's scalar fields.
-  let action: "Created" | "Updated" = "Updated";
+  let action: "Created" | "Updated" | "Replaced" = "Updated";
   let fieldCount = 0;
 
   if (isCreate) {
@@ -370,7 +508,7 @@ async function pushOneCollection(
       return { id: collection.id, title: label, ok: false, message: "collectionCreate returned no id" };
     }
     collectionId = newId;
-    action = "Created";
+    action = replaced ? "Replaced" : "Created";
     fieldCount = Object.keys(createInput).length;
   } else {
     // Update — only the fields the CSV carried.
@@ -417,7 +555,10 @@ async function pushOneCollection(
     // warning instead of failing the whole row.
     if (wantsRules && collection.rules) {
       if (currentlySmart === false) {
-        ruleNotes.push("rules not applied — this collection is manual and Shopify can't convert it to smart");
+        ruleNotes.push(
+          "rules not applied — this collection is manual and Shopify can't convert it to smart. " +
+            'Add a "Replace If Manual" column set to "yes" to delete and recreate it as a smart collection'
+        );
       } else if (currentlySmart === null) {
         ruleNotes.push("rules not applied — couldn't read the collection's current rules");
       } else {

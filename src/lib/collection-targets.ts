@@ -46,6 +46,21 @@ export type CollectionTarget = {
  * collectionCreate requires a title, so one is derived. Exported for tests and
  * so callers can report what title a created collection got.
  */
+/**
+ * "Aviator" → "aviator", "Mens Shoes" → "mens-shoes". A CSV cell is written by
+ * a person, so it arrives title-cased or spaced, while Shopify stores handles
+ * lowercase and hyphenated. Without this the lookup misses, the row falls
+ * through to create, and Shopify rejects it with "Handle has already been
+ * taken" — the collection existed all along.
+ */
+export function toHandle(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 export function titleFromHandle(handle: string): string {
   const words = handle
     .split(/[-_]+/)
@@ -67,7 +82,12 @@ export class CollectionTargets {
    * when the shop has none. Returns null when it neither exists nor could be
    * created; `error` then says why.
    */
-  async resolveOrCreate(handle: string): Promise<{ target: CollectionTarget | null; error?: string }> {
+  async resolveOrCreate(rawHandle: string): Promise<{ target: CollectionTarget | null; error?: string }> {
+    // Cache and look up by the normalised handle so "Aviator" and "aviator"
+    // are one collection, not two attempts at the same one.
+    const handle = toHandle(rawHandle);
+    if (!handle) return { target: null, error: "not a usable collection handle" };
+
     const cached = this.cache.get(handle);
     if (cached !== undefined) return { target: cached };
 
@@ -79,6 +99,17 @@ export class CollectionTargets {
 
     const created = await this.create(handle);
     if (!created.id) {
+      // "Handle has already been taken" means the collection exists but the
+      // search above didn't surface it as an exact match — Shopify may have
+      // transliterated the handle when it was first created (für → fur). Take
+      // Shopify at its word and accept whatever the search returns.
+      if (/already been taken/i.test(created.error ?? "")) {
+        const loose = await this.find(handle, { exact: false });
+        if (loose) {
+          this.cache.set(handle, loose);
+          return { target: loose };
+        }
+      }
       // Not cached: a failure here is usually transient (throttle), and the
       // next row deserves a fresh attempt.
       return { target: null, error: created.error };
@@ -89,7 +120,7 @@ export class CollectionTargets {
     return { target };
   }
 
-  private async find(handle: string): Promise<CollectionTarget | null> {
+  private async find(handle: string, options: { exact?: boolean } = {}): Promise<CollectionTarget | null> {
     type Resp = {
       data?: {
         collections?: {
@@ -104,8 +135,11 @@ export class CollectionTargets {
       variables: { q: `handle:${handle}` }
     });
     const node = resp.data?.collections?.edges?.[0]?.node;
-    // The query is a search, so guard against a fuzzy match.
-    if (!node || node.handle !== handle) return null;
+    // The query is a search, so guard against a fuzzy match — but compare
+    // normalised, since Shopify matches `handle:` case-insensitively and the
+    // stored handle is the lowercase one.
+    if (!node) return null;
+    if (options.exact !== false && toHandle(node.handle) !== handle) return null;
     return {
       id: node.id,
       smart: Array.isArray(node.ruleSet?.rules) && (node.ruleSet?.rules?.length ?? 0) > 0,

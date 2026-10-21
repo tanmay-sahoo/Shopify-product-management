@@ -21,6 +21,7 @@ type StoredCollection = {
   imageAlt?: string;
   rules?: CollectionRule[];
   rulesAppliedDisjunctively?: boolean;
+  replaceIfManual?: boolean;
 };
 
 function escape(value: unknown): string {
@@ -40,7 +41,8 @@ const FIELD_HEADERS = [
   "Image Src",
   "Image Alt",
   "Rules Match",
-  "Rules"
+  "Rules",
+  "Replace If Manual"
 ];
 
 export async function buildCollectionsReportCsv(
@@ -82,7 +84,8 @@ export async function buildCollectionsReportCsv(
         : "",
       c.rules && c.rules.length > 0
         ? formatCollectionRules({ appliedDisjunctively: Boolean(c.rulesAppliedDisjunctively), rules: c.rules })
-        : ""
+        : "",
+      c.replaceIfManual ? "yes" : ""
     ];
     const values = [row.pushError ?? "", ...fields];
     lines.push(values.map(escape).join(","));

@@ -33,6 +33,11 @@ export type ParsedCollection = {
   // From "Rules Match": false = all conditions, true = any. Undefined falls
   // back to "all" when rules are being written.
   rulesAppliedDisjunctively?: boolean;
+  // From "Replace If Manual": the row's rules matter more than the existing
+  // manual collection, so the push may delete and recreate it as smart.
+  // Shopify has no manual->smart conversion, so this is the only way a
+  // collection that already exists can end up with conditions.
+  replaceIfManual?: boolean;
   metafields: ParsedMetafield[];
 };
 
@@ -77,6 +82,23 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
           message:
             "Missing required ID or Handle column. Use ID to update collections in the same shop, " +
             "or Handle to update/create them in another shop."
+        }
+      ]
+    };
+  }
+
+  // A "Rules Match" column with no "Rules" column beside it is almost always a
+  // renamed or dropped column rather than intent — report it once, by name,
+  // instead of repeating the same failure on every row.
+  if (headerIndex.has("rules match") && !headerIndex.has("rules")) {
+    return {
+      collections: [],
+      errors: [
+        {
+          row: 0,
+          message:
+            'Found a "Rules Match" column but no "Rules" column — smart-collection conditions go in a ' +
+            `column named exactly "Rules". Columns found: ${headers.join(", ")}`
         }
       ]
     };
@@ -184,6 +206,48 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       }
     }
 
+    // "Rules Match" filled with an empty "Rules" cell means the author meant to
+    // write conditions but none arrived — a stale download, a renamed column, a
+    // row that ends before the Rules column. Pushing that row anyway creates or
+    // leaves a manual collection and reports success, which is how a rule set
+    // can be written in the sheet and silently never reach Shopify. Fail the
+    // row instead so the reason is visible before anything is written.
+    if (rules === undefined && rulesMatchCell !== undefined) {
+      errors.push({
+        row: rowNumber,
+        message:
+          `Rules Match is "${rulesMatchCell}" but the Rules cell is empty — no conditions to apply, ` +
+          `so the collection would stay manual (row skipped)`
+      });
+      return;
+    }
+
+    // "Replace If Manual": opt-in, destructive. Only consulted when the row
+    // also carries rules — on its own it does nothing.
+    const replaceCell = optional(row, "Replace If Manual");
+    let replaceIfManual: boolean | undefined;
+    if (replaceCell !== undefined) {
+      const v = replaceCell.toLowerCase();
+      if (v === "yes" || v === "true" || v === "y" || v === "1") replaceIfManual = true;
+      else if (v === "no" || v === "false" || v === "n" || v === "0") replaceIfManual = false;
+      else {
+        errors.push({
+          row: rowNumber,
+          message: `Replace If Manual "${replaceCell}" must be "yes" or "no" (row skipped)`
+        });
+        return;
+      }
+      if (replaceIfManual && rules === undefined) {
+        errors.push({
+          row: rowNumber,
+          message:
+            'Replace If Manual is "yes" but the row carries no Rules — there is nothing to recreate the ' +
+            "collection as, so it would be deleted and rebuilt identical (row skipped)"
+        });
+        return;
+      }
+    }
+
     const collection: ParsedCollection = {
       rowNumber,
       id: normalizedId,
@@ -199,6 +263,7 @@ export function parseCollectionsCsv(text: string): CollectionParseResult {
       imageAlt: optional(row, "Image Alt"),
       rules,
       rulesAppliedDisjunctively,
+      replaceIfManual,
       metafields
     };
 
