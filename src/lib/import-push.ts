@@ -821,6 +821,7 @@ type ProductSnapshot = {
     inventoryQuantity: number | null;
     inventoryPolicy: string | null;
     taxable: boolean | null;
+    selectedOptions: Array<{ name: string; value: string }>;
     inventoryItem: {
       id: string | null;
       tracked: boolean | null;
@@ -856,6 +857,7 @@ async function fetchProductSnapshot(auth: ShopAuth, productId: string): Promise<
               inventoryQuantity: number | null;
               inventoryPolicy: string | null;
               taxable: boolean | null;
+              selectedOptions: Array<{ name: string | null; value: string | null }> | null;
               inventoryItem: {
                 id: string | null;
                 tracked: boolean | null;
@@ -912,6 +914,9 @@ async function fetchProductSnapshot(auth: ShopAuth, productId: string): Promise<
           inventoryQuantity: node.inventoryQuantity,
           inventoryPolicy: node.inventoryPolicy,
           taxable: node.taxable,
+          selectedOptions: (node.selectedOptions ?? [])
+            .filter((o) => o.name && o.value)
+            .map((o) => ({ name: o.name as string, value: o.value as string })),
           inventoryItem: node.inventoryItem
             ? {
                 id: node.inventoryItem.id,
@@ -1151,26 +1156,48 @@ async function pushOneProduct(
     }
 
     // Variant diff. Match incoming variants to existing by Variant ID first
-    // (so SKU renames are safe), then fall back to SKU. For matched ones,
-    // only patch fields that actually changed. Variants that exist in
-    // Shopify but not in the CSV are LEFT ALONE — Shopify's bulk import has
-    // the same additive behaviour.
+    // (so SKU renames are safe), then SKU, then option values, and finally —
+    // for a single-variant product whose row names no variant at all — the
+    // product's one and only variant. That last case is the common one: a CSV
+    // carrying just Handle, ID, Title and Variant Price means "this product's
+    // price", and without it the row matched nothing, fell through to create,
+    // and Shopify rejected it with "The variant 'Default Title' already
+    // exists" — leaving the price unchanged.
+    // For matched ones, only patch fields that actually changed. Variants that
+    // exist in Shopify but not in the CSV are LEFT ALONE — Shopify's bulk
+    // import has the same additive behaviour.
     const incomingVariants = dedupeVariantsByOptions(product.variants);
     const existingById = new Map<string, ProductSnapshot["variants"][number]>();
     const existingBySku = new Map<string, ProductSnapshot["variants"][number]>();
+    const existingByOptions = new Map<string, ProductSnapshot["variants"][number]>();
     for (const v of snapshot?.variants ?? []) {
       existingById.set(v.id, v);
       if (v.sku) existingBySku.set(v.sku.trim(), v);
+      const key = v.selectedOptions
+        .map((o) => o.value.trim().toLowerCase())
+        .join("|");
+      if (key) existingByOptions.set(key, v);
     }
+    const soleExisting = (snapshot?.variants ?? []).length === 1 ? snapshot?.variants[0] : undefined;
 
     const variantPatches: Array<Record<string, unknown>> = [];
     const variantsToCreate: ParsedVariant[] = [];
     for (const incoming of incomingVariants) {
       const variantGid = incoming.variantId ? toVariantGid(incoming.variantId) : "";
       const sku = (incoming.sku ?? "").trim();
+      const optionKey = [incoming.option1Value, incoming.option2Value, incoming.option3Value]
+        .map((v) => (v ?? "").trim().toLowerCase())
+        .filter(Boolean)
+        .join("|");
+      // No ID, no SKU, no option values: the row identifies nothing, so it can
+      // only mean the product's sole variant. One incoming row only — two such
+      // rows would both claim it.
+      const unidentified = !variantGid && !sku && !optionKey && incomingVariants.length === 1;
       const existing =
         (variantGid && existingById.get(variantGid)) ||
-        (sku ? existingBySku.get(sku) : undefined);
+        (sku ? existingBySku.get(sku) : undefined) ||
+        (optionKey ? existingByOptions.get(optionKey) : undefined) ||
+        (unidentified ? soleExisting : undefined);
       if (!existing) {
         variantsToCreate.push(incoming);
         continue;

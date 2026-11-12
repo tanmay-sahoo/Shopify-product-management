@@ -248,6 +248,18 @@ function parseBool(value: string): boolean {
 // (1234567890123 → "1.23E+12"). Detect that case and return a sentinel
 // so the parser can emit a clear row-level error — silently rounding
 // would risk pointing at the wrong product entirely.
+// Other exporters name the same column differently — Google Merchant and most
+// supplier feeds say "GTIN"/"EAN"/"UPC" where Shopify says "Variant Barcode".
+// Resolve those to the canonical header so a supplier sheet imports as-is
+// instead of having its column silently ignored.
+const HEADER_ALIASES: Record<string, string[]> = {
+  "variant barcode": ["gtin", "ean", "upc", "barcode", "variant gtin", "variant ean", "variant upc"],
+  "variant sku": ["sku"],
+  "variant price": ["price"],
+  "variant compare at price": ["compare at price"],
+  "cost per item": ["variant cost", "cost"]
+};
+
 const SCIENTIFIC_ID = "__SCIENTIFIC_NOTATION__";
 function normalizeShopifyId(value: string): string {
   const trimmed = value.trim();
@@ -273,10 +285,21 @@ export function parseShopifyCsv(text: string): ParseResult {
   }
 
   const headerIndex = new Map<string, number>();
-  headers.forEach((h, i) => headerIndex.set(h.toLowerCase(), i));
+  headers.forEach((h, i) => headerIndex.set(h.toLowerCase().trim(), i));
+  // Fill in canonical names the file does not carry from any alias it does.
+  for (const [canonical, aliases] of Object.entries(HEADER_ALIASES)) {
+    if (headerIndex.has(canonical)) continue;
+    for (const alias of aliases) {
+      const i = headerIndex.get(alias);
+      if (i !== undefined) {
+        headerIndex.set(canonical, i);
+        break;
+      }
+    }
+  }
 
   function val(row: string[], name: string): string {
-    const i = headerIndex.get(name.toLowerCase());
+    const i = headerIndex.get(name.toLowerCase().trim());
     return i !== undefined ? row[i] ?? "" : "";
   }
 
@@ -449,8 +472,28 @@ export function parseShopifyCsv(text: string): ParseResult {
     const option3 = val(row, "Option3 Value");
     const price = val(row, "Variant Price");
     const inventory = val(row, "Variant Inventory Qty");
+    // Barcodes are long digit strings, so Excel mangles them exactly as it
+    // does Shopify IDs ("4006690000000" -> "4.0067E+12"). Writing that to
+    // Shopify would store a barcode that scans as nothing, so refuse it.
+    let barcode = val(row, "Variant Barcode").trim();
+    if (/^[+-]?\d+(\.\d+)?[eE][+-]?\d+$/.test(barcode)) {
+      errors.push({
+        row: rowNumber,
+        message:
+          `Barcode/GTIN column has scientific notation (e.g. "4.0669E+12") — Excel rounded the value. ` +
+          `Re-open the CSV in Google Sheets, or in Excel format the column as Text before saving.`
+      });
+      barcode = "";
+    }
     const isVariantRow =
-      sku !== "" || variantIdRaw !== "" || option1 !== "" || option2 !== "" || option3 !== "" || price !== "" || inventory !== "";
+      sku !== "" ||
+      variantIdRaw !== "" ||
+      option1 !== "" ||
+      option2 !== "" ||
+      option3 !== "" ||
+      price !== "" ||
+      inventory !== "" ||
+      barcode !== "";
 
     if (isVariantRow) {
       // Prefer Variant ID for dedupe when present (lets partial-update CSVs
@@ -481,7 +524,7 @@ export function parseShopifyCsv(text: string): ParseResult {
       }
 
       setIfPresent("sku", sku);
-      setIfPresent("barcode", val(row, "Variant Barcode"));
+      setIfPresent("barcode", barcode);
       setIfPresent("price", price);
       setIfPresent("compareAtPrice", val(row, "Variant Compare At Price"));
       setIfPresent("inventoryQuantity", inventory);
